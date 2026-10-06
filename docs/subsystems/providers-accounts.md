@@ -41,7 +41,7 @@ keys and accounts per request is in [Gateway routing and fallback](gateway-routi
 
 ## Constraints and failure behavior
 
-- SiliconFlow is one API-key relay preset with China (`cn`, default) and
+- SiliconFlow is an API-key preset with China (`cn`, default) and
   Global (`intl`) regions in [`presets.go`](../../internal/provider/presets.go).
   The region selects the `.cn` or `.com` Chat endpoint, cloud website, key
   page, and models.dev catalogue (`siliconflow-cn` or `siliconflow`). The

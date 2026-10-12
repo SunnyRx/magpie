@@ -13,6 +13,7 @@ import (
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/testenv"
 )
 
 // claudeDistroHome is a distro's / in a temp dir with a user whose
@@ -163,6 +164,9 @@ func TestWSLClaudePick(t *testing.T) {
 		nat := t.TempDir()
 		os.MkdirAll(filepath.Join(nat, ".claude"), 0o755)
 		os.WriteFile(filepath.Join(nat, ".claude", "settings.json"), []byte(before), 0o644)
+		// syncHome's CLAUDE_CONFIG_DIR names the sandbox's own ~/.claude,
+		// which native Claude Code now reads (#1482): this one's is nat's
+		t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(nat, ".claude"))
 		n := claude(nat)
 		n.Field("model").Set("relay/glm-4.6")
 		n.Field("effort").Set("max")
@@ -332,9 +336,8 @@ func TestWSLClaudeNotFolded(t *testing.T) {
 	// this machine's Claude Code signed in, as its files say, with an inert
 	// claude first on PATH: the machine's own is never asked
 	bin := t.TempDir()
-	writeFile(t, filepath.Join(bin, "claude"), "#!/bin/sh\nexit 1\n")
+	testenv.Program(t, filepath.Join(bin, "claude"), "#!/bin/sh\nexit 1\n")
 	writeFile(t, filepath.Join(bin, "claude.cmd"), "@exit /b 1\r\n")
-	os.Chmod(filepath.Join(bin, "claude"), 0o755)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	writeFile(t, filepath.Join(home, ".claude", ".credentials.json"), fmt.Sprintf(
 		`{"claudeAiOauth":{"accessToken":"tok","refreshToken":"r","expiresAt":%d,"subscriptionType":"max"}}`, time.Now().Add(time.Hour).UnixMilli()))

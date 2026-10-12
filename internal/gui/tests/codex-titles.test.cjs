@@ -10,6 +10,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { watchSettingsReads, settingsDrawn } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 
@@ -86,7 +87,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         }
         await browser.close();
       });
+      await watchSettingsReads(page);
       await page.goto("http://magpie.test/?view=settings");
+      await settingsDrawn(page); // rows found are the ones that stay (#1659)
       const row = page.locator("#codexTitlesRow");
       const pick = page.locator("#codexTitlesPick button");
       await pick.waitFor();
@@ -94,6 +97,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal((await row.locator(".name").textContent()).trim(), want[lang].name);
       assert.equal((await pick.textContent()).trim(), want[lang].own, "Codex's own by default");
       assert.match(await row.locator(".sub").textContent(), want[lang].subOwn);
+      // the chip's icon is the chip's size, not the row's 18–22px (duanckham on X)
+      assert.deepEqual(await pick.locator(".ic").evaluate((e) => [e.offsetWidth, e.offsetHeight]), [14, 14]);
 
       // scrolled by a wheel till the row is mid-view, so a click that
       // moved the page would show

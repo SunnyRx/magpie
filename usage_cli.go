@@ -80,10 +80,11 @@ func usageTo(out io.Writer, args []string) error {
 		return stats.WriteCSV(out, rows)
 	}
 	loadCostCurrency()
-	s := stats.Summarize(period)
-	// the calls the agents made on their own, read from their session files:
-	// the window's Requests tab counts them too (Kumo31 on Discord)
-	d := stats.Direct(period)
+	// s is the calls through magpie, d the calls the agents made on their
+	// own, read from their session files: the window's Requests tab counts
+	// them too (Kumo31 on Discord). Asked together, both are of one day when
+	// midnight falls while they are read.
+	s, d := stats.Summaries(period)
 	title := map[stats.Period]string{stats.Today: "today", stats.Week: "last 7 days", stats.Month: "last 30 days", stats.All: "all time"}[s.Period]
 	if s.Calls == 0 && d.Calls == 0 {
 		fmt.Fprintln(out, muted.Render("no calls "+title+" ·"), "route an agent through magpie and its usage shows up here")
@@ -114,10 +115,16 @@ func printUsage(out io.Writer, s stats.Summary, title string, names map[string]s
 	fmt.Fprintln(out, bold.Render(fmtTokens(s.Tokens())+" tokens"), muted.Render(title+" ·"), plural(s.Calls, "call"), muted.Render("·"), cost(s.Totals))
 	fmt.Fprintln(out, muted.Render("  in "+fmtTokens(s.Input)+"  out "+fmtTokens(s.Output)+"  cache read "+fmtTokens(s.CacheRead)+"  cache write "+fmtTokens(s.CacheWrite)+"  reasoning "+fmtTokens(s.Reasoning)),
 		func() string {
+			// requests, each counted once by how it ended: one a later try
+			// answered is not an error (小一 on Discord)
+			more := ""
 			if s.Errors > 0 {
-				return muted.Render(" · ") + plural(s.Errors, "error")
+				more += muted.Render(" · ") + plural(s.Errors, "error")
 			}
-			return ""
+			if s.Retried > 0 {
+				more += muted.Render(" · ") + fmt.Sprintf("%d answered on a retry", s.Retried)
+			}
+			return more
 		}())
 	table := func(head string, gs []stats.Group, name func(stats.Group) string) {
 		fmt.Fprintln(out)
@@ -184,8 +191,8 @@ func printUsage(out io.Writer, s stats.Summary, title string, names map[string]s
 	if len(s.Sessions) > 0 {
 		top := s.Sessions[:min(len(s.Sessions), 10)]
 		head := "sessions"
-		if len(s.Sessions) > len(top) {
-			head = fmt.Sprintf("sessions · top %d of %d", len(top), len(s.Sessions))
+		if s.SessionCount > len(top) {
+			head = fmt.Sprintf("sessions · top %d of %d", len(top), s.SessionCount)
 		}
 		table(head, top, func(g stats.Group) string {
 			n := names[g.Agent]

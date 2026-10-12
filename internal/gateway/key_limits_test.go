@@ -273,11 +273,28 @@ func TestRestingKeyReadAgainInAnOrderedGroup(t *testing.T) {
 	t.Cleanup(func() { keyAllowance = old })
 	week := time.Now().Add(72 * time.Hour).Truncate(time.Second).Format(time.RFC3339)
 	var mu sync.Mutex
-	limit, reads := 800, 0
+	limit, reads, raised := 800, 0, 0
+	// the owner raises the limit after the key refused, before magpie
+	// reads its windows again: a reading that reaches the relay after the
+	// refusal waits for it. Else the reading ee2588c2 asks again at once,
+	// once one still out as the key refused is back, could reach the
+	// relay first (a loaded CI runner), see the week still used up and be
+	// trusted for its minute, past this test's wait (d7bdb076's CI)
+	var refused bool
+	raise := make(chan struct{})
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		held := refused
+		mu.Unlock()
+		if held {
+			<-raise
+		}
 		mu.Lock()
 		l := limit
 		reads++
+		if l > 800 {
+			raised++
+		}
 		mu.Unlock()
 		fmt.Fprintf(w, `{"isValid":true,"mode":"quota_limited","status":"active","rate_limits":[{"window":"7d","limit":%d,"used":800,"remaining":%d,"reset_at":%q}]}`, l, l-800, week)
 	}))
@@ -297,6 +314,10 @@ func TestRestingKeyReadAgainInAnOrderedGroup(t *testing.T) {
 	if !ok {
 		t.Fatal("no group")
 	}
+	// its card read first: no reading of the plan's own is out when the
+	// key refuses, whose reading again after it would come before the
+	// limit is raised, and read it unraised
+	provider.KeyBalances(context.Background()) // its card: its week used up
 	s := &Server{}
 	first := func() (string, *Rest) {
 		out, pl := s.planGroup(g, ms, provider.Responses)
@@ -314,8 +335,17 @@ func TestRestingKeyReadAgainInAnOrderedGroup(t *testing.T) {
 	}
 	a := cs[0]
 	t.Cleanup(func() { clearRest(a.restKey()) })
-	provider.KeyBalances(context.Background()) // its card: its week used up
 	quota := []byte(`{"error":{"message":"api key 7天限额已用完","type":"rate_limit_exceeded"}}`)
+	mu.Lock()
+	refused = true
+	mu.Unlock()
+	defer func() {
+		select {
+		case <-raise:
+		default:
+			close(raise) // failed before the limit was raised
+		}
+	}()
 	if r := s.restAfter(a, 429, http.Header{}, quota); r.Why != failQuota || r.By != "window" {
 		t.Fatalf("out of its week: rests by %s (%s)", r.By, r.Why)
 	}
@@ -324,8 +354,15 @@ func TestRestingKeyReadAgainInAnOrderedGroup(t *testing.T) {
 	mu.Lock()
 	limit = 1000
 	mu.Unlock()
-	if at, r := first(); at != "kx" || r == nil {
-		t.Fatalf("resting: %s first, its rest %v", at, r)
+	close(raise)
+	// a reading out as the key refused is followed by another at once,
+	// which may have seen the limit raised and brought it back already
+	at, r := first()
+	mu.Lock()
+	seen := raised
+	mu.Unlock()
+	if (at != "kx" || r == nil) && (at != "ko" || r != nil || seen == 0) {
+		t.Fatalf("resting: %s first, its rest %v, the raised limit read %d times", at, r, seen)
 	}
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		r, ok := restOf(a.restKey())

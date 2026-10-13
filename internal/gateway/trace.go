@@ -76,6 +76,9 @@ type Route struct {
 	// counts: streamed replies only (#196)
 	TTFT      int64 `json:"ttft,omitempty"`
 	FirstText int64 `json:"firstText,omitempty"`
+	// FirstReasoning is the start of paced visible reasoning, absent for hidden reasoning.
+	FirstReasoning  int64 `json:"firstReasoning,omitempty"`
+	ReasoningHidden bool  `json:"reasoningHidden,omitempty"`
 	// Flow: the ms its content took to come (Call.Flow)
 	Flow int64 `json:"flow,omitempty"`
 	// Served: the model the reply says answered, as the last try has it;
@@ -235,9 +238,16 @@ type Weighed struct {
 	// Aside: a key made for another protocol than the keys routed over,
 	// tried only after them
 	Aside bool `json:"aside,omitempty"`
+	// NoURL: its keys are all set to this protocol, which its provider has
+	// no URL for, so it was tried on the URLs it has (#1702)
+	NoURL provider.Protocol `json:"noURL,omitempty"`
 	// Via: the groups in the group it is of, outermost first, when it is
 	// of a group in the group asked for
 	Via []string `json:"via,omitempty"`
+	// UsedRenews: when the window Used is the share of renews, apart
+	// from Renews' biggest first: a row says the two together, so of one
+	// window, a Factory account's week and not its month (#1778)
+	UsedRenews *time.Time `json:"usedRenews,omitempty"`
 	// Sunk: when it was rate limited with quota left, sending it to the
 	// back of an order that sinks (sink.go); nil when it didn't, or the
 	// order doesn't sink
@@ -262,6 +272,9 @@ type Try struct {
 	// first text, when it streamed any (#196)
 	TTFT      int64 `json:"ttft,omitempty"`
 	FirstText int64 `json:"firstText,omitempty"`
+	// FirstReasoning is the start of paced visible reasoning, absent for hidden reasoning.
+	FirstReasoning  int64 `json:"firstReasoning,omitempty"`
+	ReasoningHidden bool  `json:"reasoningHidden,omitempty"`
 	// Flow: the ms its content took to come (Call.Flow)
 	Flow int64 `json:"flow,omitempty"`
 	// Served: the model its reply said answered, when it named one;
@@ -308,11 +321,15 @@ type planned struct {
 	// held: the accounts left out (in left) as they won't spend their
 	// credits, for one that spends its resets by itself to spend one
 	held []candidate
+	// capped: the accounts left out (in left) as they are past the usage
+	// cap set on them, for a conversation that stays strictly on one to
+	// go on there (provider.AffinityStrict, #1797)
+	capped []candidate
 }
 
 func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from provider.Protocol) Weighed {
 	w := Weighed{ID: c.rest, Provider: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Model: c.model, Fixed: c.effort, Fast: c.fast,
-		Routing: p.Routing, Fallback: fallback, Shared: c.rest != p.ID, Rank: c.rank}
+		Routing: p.Routing, Fallback: fallback, Shared: c.rest != p.ID, Rank: c.rank, NoURL: c.noURL}
 	switch {
 	case c.p.Account != nil:
 		w.Kind, w.Who, w.Agent, w.Plan = "account", c.p.Account.User, c.p.Account.Agent, c.p.Account.Plan
@@ -332,6 +349,10 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 	}
 	if l, ok := wg.lefts[c.allowanceKey()]; ok {
 		w.Known, w.Used, w.Renews, w.Pace = true, l.used, l.renews, l.pace
+		if !l.fullest.IsZero() {
+			ur := l.fullest
+			w.UsedRenews = &ur
+		}
 		if l.of > 0 {
 			w.Amount, w.Limit, w.Unit = l.amount, l.of, l.unit
 		}

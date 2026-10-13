@@ -6,7 +6,6 @@ import (
 	"debug/buildinfo"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -235,6 +234,11 @@ type Agent struct {
 	// has a provider of the same name (OpenHanako's own
 	// deepseek/deepseek-v4-pro read as magpie's deepseek, #835).
 	Spelled func(v string) bool
+	// ModelAliases are the names the agent's model takes besides ids
+	// (Claude Code's opus, best, opusplan). One that names a field as well
+	// is the model's on the command line: magpie claude opus sets the
+	// model, where another field's name alone shows that field.
+	ModelAliases []string
 	// detect, when set, says whether the agent is here in place of looking
 	// for its files and binary: a distro's, probed once.
 	detect func() bool
@@ -254,6 +258,10 @@ type Agent struct {
 	// (omp's, when PI_CODING_AGENT_DIR points it at Pi's): that it is there
 	// says nothing of this agent.
 	dirShared bool
+	// pathOwn, when set, says whether the file at Path is this agent's,
+	// not one another tool wrote there first: a JetBrains plugin's
+	// settings.json in Qoder CN's folder (#1495).
+	pathOwn func() bool
 }
 
 // Running reports whether a process whose command line matches any pattern
@@ -263,8 +271,10 @@ type Agent struct {
 // "open a new dsh session"), and a Windows that answered no here dropped
 // that advice silently — a model picked in magpie looked like it had done
 // nothing at all. claudeRunning and Pencil's own check already say they
-// can't be told, and say yes for the same reason.
-func Running(patterns ...string) bool {
+// can't be told, and say yes for the same reason. A var so tests can say
+// what runs, as claudeRunning is: magpie's own CLI tests printed "restart
+// the Codex app" on a Mac with Codex open, and on every Windows.
+var Running = func(patterns ...string) bool {
 	if runtime.GOOS == "windows" {
 		return len(patterns) > 0
 	}
@@ -286,7 +296,7 @@ func (a *Agent) Detected() bool {
 	if a.Dir != "" && Taken(a.Dir) {
 		return false
 	}
-	if _, err := os.Stat(a.Path); err == nil {
+	if _, err := os.Stat(a.Path); err == nil && (a.pathOwn == nil || a.pathOwn()) {
 		return true
 	}
 	if a.Dir != "" && !a.dirShared && agentDir(a.Dir) {
@@ -306,9 +316,10 @@ func (a *Agent) Detected() bool {
 // started before Claude Code's installer put claude.exe in ~/.local/bin
 // and added that to the user's PATH, or a self-update restarting with the
 // PATH it had then, never listed it, while the sign-in, which asked
-// FindTool, found it (#839, #1482). "" when it is in none.
+// FindTool, found it (#839, #1482). A mise wrapper script found there is
+// given as the program it runs (proc.LookPath). "" when it is in none.
 func binAt(name string) string {
-	if p, err := exec.LookPath(name); err == nil {
+	if p, err := proc.LookPath(name); err == nil {
 		return p
 	}
 	if runtime.GOOS == "windows" {
@@ -393,15 +404,16 @@ var goPrograms struct {
 	m map[goProgramKey]bool
 }
 
-// Field looks a field up by key.
+// Field looks a field up by key, in any case, as Find looks an agent up
+// (magpie codex Model was written as the model).
 func (a *Agent) Field(key string) *Field {
 	for i := range a.Fields {
-		if a.Fields[i].Key == key {
+		if strings.EqualFold(a.Fields[i].Key, key) {
 			return &a.Fields[i]
 		}
 	}
 	for i := range a.Fields {
-		if a.Fields[i].Label == key { // `magpie gemini auth …`: the label as shown
+		if strings.EqualFold(a.Fields[i].Label, key) { // `magpie gemini auth …`: the label as shown
 			return &a.Fields[i]
 		}
 	}

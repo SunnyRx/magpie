@@ -370,6 +370,7 @@ func (m *model) openProviderModels(id string) {
 		crumbs: []string{"providers", p.Name, "models"},
 		input:  newInput("filter models"),
 		items:  modelOptions(id),
+		relist: func() []agent.Option { return modelOptions(id) },
 		empty:  "no models known yet · m on the providers list asks the vendor for them",
 		toggle: func(model string) ([]agent.Option, string, bool) {
 			p, err := provider.Find(id)
@@ -1039,6 +1040,9 @@ func (m model) viewUsage() string {
 // tables, the gateway's or the agents' own calls.
 func (m model) usageBlock(b *strings.Builder, s usage.Summary, room int, names map[string]string) {
 	line := sName.Render(fmtTokens(s.Tokens())+" tokens") + sMuted.Render(fmt.Sprintf(" · %d call%s · ", s.Calls, plural(s.Calls))) + sOK.Render(fmtCost(s.Totals))
+	if s.Unpriced > 0 { // calls with no known price, not in the cost (#1856)
+		line += sMuted.Render(fmt.Sprintf(" (%d call%s unpriced)", s.Unpriced, plural(s.Unpriced)))
+	}
 	if s.Errors > 0 {
 		line += sMuted.Render(" · ") + sBad.Render(fmt.Sprintf("%d error%s", s.Errors, plural(s.Errors)))
 	}

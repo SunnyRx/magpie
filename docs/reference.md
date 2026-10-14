@@ -1358,8 +1358,10 @@ result for every request: who went first, and why.
 6. **The conversation's account first.** Once an account has answered a
    conversation, it is moved to the front for the conversation's next
    requests, as *Stays* says. In auto mode that is within a turn, and
-   across turns while at least 1,024 tokens of the last request were read
-   from the vendor's cache and it answered in the last 5 minutes. This
+   across turns while the last request read from the vendor's cache and
+   wrote to it at least 1,024 tokens between them, and it answered in the
+   last 5 minutes. A first turn reads nothing and writes the whole prompt,
+   so the second stays to read it. This
    never brings back an account that is resting, nor one that has used 98%
    of a window (100% In order). *Stays: Strict* does, and asks no other:
    the conversation stays on its account, resting, spent or past its cap,
@@ -1453,7 +1455,13 @@ minutes. Out of credit rests half an hour. Any other failure rests a minute, lon
 again, up to 10 minutes; a subscription that fails with a window used up
 rests until that window renews. `magpie provider rest-cap <id> 4h` moves
 both of those caps, 30 and 10 minutes, for one provider's keys and
-accounts, up to 8 days; `default` gives them back.
+accounts, from 1 minute (every rest a minute) up to 8 days; `default` gives
+them back. `magpie provider rest-cap <id> off` is for a relay or an account
+pool whose unknown errors come now and then: a key or account of it that
+fails without saying why (a 5xx, a dropped connection) doesn't rest at all,
+and the next request asks it again. A refused key (401, 403), a model it
+doesn't serve, being out of quota or credit, or a rate limit still rests
+it as above.
 
 **When the safety filter refuses.** A reply the vendor's safety filter
 refuses before any of it is said rests nobody: it is about what was asked,
@@ -1630,9 +1638,9 @@ It exposes:
 
 Each `/v1/models` entry includes `reasoning` and `supported_reasoning_levels`
 (`[{"effort":"low"}, ...]`). A routing group is marked `reasoning` when any
-member thinks, even where it offers no levels to pick from (a member known
-to take none still leaves the group none); `supported_reasoning_levels`
-lists only the levels every member supports, as before. A member magpie
+member thinks; `supported_reasoning_levels` lists the levels the members
+that think have in common. A member known not to think doesn't take them
+away (#2127), nor does one whose levels nothing knows (#597). A member magpie
 knows does not think is sent no reasoning ask when the group routes to it,
 so the effort the group is asked for reaches the members that take it and
 doesn't turn a vendor away as a 400; a member nothing speaks for is sent

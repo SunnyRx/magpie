@@ -473,6 +473,7 @@ var presets = []PresetDef{
 	{ID: "siliconflow", Name: "SiliconFlow", Icon: "siliconcloud-color", Kind: KindRelay, Catalog: "siliconflow-cn",
 		Chat:    "https://api.siliconflow.cn/v1",
 		Website: "https://cloud.siliconflow.cn", KeysURL: "https://cloud.siliconflow.cn/account/ak",
+		// the international site is another account, keys and balance (in $)
 		Regions: []Region{
 			{ID: "cn", Name: "China", Chat: "https://api.siliconflow.cn/v1", Catalog: "siliconflow-cn",
 				Website: "https://cloud.siliconflow.cn", KeysURL: "https://cloud.siliconflow.cn/account/ak"},

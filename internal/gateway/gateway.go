@@ -60,6 +60,10 @@ func agentOf(r *http.Request) string {
 	if isClaudeDesktop(r) {
 		return "claude-desktop"
 	}
+	if isClaudeScience(r) {
+		// Claude Science's client, an Anthropic SDK's User-Agent
+		return ScienceID
+	}
 	ua := r.Header.Get("User-Agent")
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(ua)), "cursor") {
 		// cursor-agent talks to Cursor's backend alone, never to a
@@ -80,7 +84,7 @@ func startedByAgent(r *http.Request, agent string) bool {
 	if _, ok := strings.CutPrefix(callerKey(r), Token+"-"); ok {
 		return false
 	}
-	return agent != "claude-desktop" && agent != "cursor-local" && !usage.IsAgent(agent)
+	return agent != "claude-desktop" && agent != "cursor-local" && agent != ScienceID && !usage.IsAgent(agent)
 }
 
 // StandIn is the model an agent is set to use in place of one it named that
@@ -377,6 +381,10 @@ type Server struct {
 	requestLimits requestLimits
 	// what a restart would cut short (busy.go)
 	busyCounters
+	// when Antigravity last turned away the system prompt it refuses
+	// (UnixNano, 0 for never): while that is recent, a group skips it for
+	// such a request when someone is left after it (antigravityForeseen)
+	agTurnedAway atomic.Int64
 }
 
 // New makes a gateway.
@@ -899,8 +907,10 @@ func catalogFor(r *http.Request) []provider.Entry {
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	data := []map[string]any{}
 	shown := catalogFor(r)
-	if agentOf(r) == "claude-desktop" {
+	if agent := agentOf(r); agent == "claude-desktop" {
 		data = desktopModels(shown)
+	} else if agent == ScienceID {
+		data = scienceModels(shown)
 	} else {
 		labels := provider.Labels(shown)
 		// for another magpie: how it searches the web for each model
@@ -1008,6 +1018,12 @@ func (s *Server) model(w http.ResponseWriter, r *http.Request) {
 	shown := keyAllowed(r, provider.Catalog())
 	for _, e := range shown {
 		if e.ID == id {
+			if agentOf(r) == ScienceID {
+				// by the alias it asked by, which it keeps what it reads
+				// under
+				writeJSON(w, 200, scienceObject(e, provider.Labels([]provider.Entry{e})[0]))
+				return
+			}
 			writeJSON(w, 200, modelObject(e))
 			return
 		}
@@ -1259,6 +1275,20 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 		if from == provider.Chat {
 			body = thinkingEffort(body)
 		}
+		// Claude Code's headers, for a test asked as Claude Code to ask
+		// with (provider.TestAs), whatever serves this model: a
+		// subscription's, a Chat provider's or a translated one's request
+		// never takes them on, and Claude Code may never be on a relay's
+		// Messages model before the test is asked (neiko on Discord)
+		if from == provider.Anthropic && fromClaudeCode(r.Header) {
+			seen := http.Header{}
+			for k, vs := range r.Header {
+				if claudeCodeHeader(k) {
+					seen[k] = vs
+				}
+			}
+			provider.SawClient(provider.ClientClaudeCode, seen)
+		}
 		// Codex with magpie as its provider asks for a thread's title
 		// here (#743)
 		if from == provider.Responses {
@@ -1473,6 +1503,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	if agent == "claude-desktop" {
 		sub, _ := subagentOf(r.Header)
 		asked = desktopTurn(asked, body, fromClaudeCode(r.Header), sub != "")
+	} else if agent == ScienceID {
+		asked = scienceTurn(asked, body)
 	}
 	// a stand-in that is a tier at an effort of its own ("<model>:<level>",
 	// #536) is that model at that level, as were it asked for so
@@ -2143,12 +2175,28 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				attemptBody, _ = textOnlyBody(from, body) // omit images in prior turns and tool results
 			}
 		}
+		if !last && s.antigravityForeseen(c.p, from, attemptBody) {
+			// Antigravity would only turn it away, as it did lately, and
+			// someone after it may answer: it isn't asked, and nothing is
+			// held against the account (#2156). If nobody after it answers
+			// but with a quota, the agent is told this, as it would be had
+			// Antigravity been asked
+			if other == nil {
+				other = &Try{Status: turnedAwayStatus, Error: c.p.Name + ": " + antigravityTurnedAwayHint}
+			}
+			skipped = append(skipped, c.label()+": "+antigravityTurnedAwayHint)
+			continue
+		}
 		// a group tells agents the longest reply a member of it gives
-		// (groupEntries); each member is asked for no more than its own
+		// (groupEntries); each member is asked for no more than its own.
+		// Outside a group only the user's own Max output lowers a request
+		// (userOutput): a vendor's figure may be stale, the user's is asked
 		if isGroup {
 			if n := outputLimit(c.p, c.model); n > 0 {
 				attemptBody = withMaxOutput(from, attemptBody, n)
 			}
+		} else if n := userOutput(c.p, c.model); n > 0 {
+			attemptBody = withMaxOutput(from, attemptBody, n)
 		}
 		picked := false // the effort asked for in place of the agent's
 		// a member fixed at an effort (#189), else the model asked for at
@@ -2408,6 +2456,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				// its words, and why, as its 429 is told (#1425)
 				call.Error = c.p.Name + ": " + provider.APIError([]byte(hw.failMsg), hw.failMsg)
 			}
+		}
+		if hw.turnedAway {
+			s.agTurnedAway.Store(time.Now().UnixNano())
 		}
 		if hw.turnedAway && !strings.HasSuffix(call.Error, antigravityTurnedAwayHint) {
 			call.Error += " — " + antigravityTurnedAwayHint
@@ -2974,7 +3025,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// a compaction a rule sent to a model of its own leaves the
 			// conversation, and the turn's size, where they were
 			if hit == nil || !hit.Compact {
-				answered(stuck, c, aff.Turn, call.Usage.CacheRead)
+				answered(stuck, c, aff.Turn, call.Usage.CacheRead, call.Usage.CacheWrite)
 			}
 			if hit != nil && !hit.Compact {
 				ruleAnswered(ruleAt, call.Usage)
@@ -3165,8 +3216,10 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 		noteMember(w, r, p, model)
 	}
 	// a backend that only streams gets a non-streaming request translated
-	// (the provider is always streamed on that path) rather than relayed
-	relay := slices.Contains(s.usable(p, model), from) && (p.Account == nil || !p.Account.Stream || streamOf(body))
+	// (the provider is always streamed on that path) rather than relayed,
+	// except a plugin's on Responses, which is relayed streamed and given
+	// back whole (gathers)
+	relay := slices.Contains(s.usable(p, model), from) && (p.Account == nil || !p.Account.Stream || streamOf(body) || gathers(p, from, body))
 	// a Claude model is asked on Messages whatever API the client spoke,
 	// for the cache breakpoints the translation adds: OpenCode speaks Chat
 	// for every model, and a relay drops cache_control on Chat, so every
@@ -3418,16 +3471,12 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 		if p.Account == nil && fromClaudeCode(in) {
 			// a relay that serves only Claude Code (#179: "only accessible
 			// via the official Claude CLI") knows it by its own headers,
-			// which go on as it sent them; its key to magpie never does.
-			// A test asked as Claude Code asks with them (provider.TestAs)
-			seen := http.Header{}
+			// which go on as it sent them; its key to magpie never does
 			for k, vs := range in {
 				if claudeCodeHeader(k) {
 					req.Header[k] = slices.Clone(vs)
-					seen[k] = vs
 				}
 			}
-			provider.SawClient(provider.ClientClaudeCode, seen)
 		}
 		if len(betas) > 0 {
 			req.Header.Set("anthropic-beta", strings.Join(betas, ","))
@@ -3593,6 +3642,13 @@ func codexClientHeader(k string) bool {
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (status int, msg string, done bool) {
 	upstream := provider.UpstreamNameIn(wiresOf(r.Context()), p.ID, model)
 	body = rewriteModel(body, upstream)
+	// a client that asked for one body, of an account that only streams:
+	// asked streamed, the stream read here (gathered)
+	var gather *gathered
+	if gathers(p, proto, body) {
+		gather = &gathered{h: http.Header{}, status: http.StatusOK}
+		body = withFields(body, map[string]any{"stream": true})
+	}
 	searchFn := false    // Codex's tool search sent as a function
 	geminiWhole := false // a Gemini client's generateContent
 	// a model that wants its reasoning text back (#388, #1104)
@@ -4043,6 +4099,10 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		return writeError(w, proto, res.StatusCode, msg), msg, true
 	}
 	rd, sse := eventStream(res)
+	client := w
+	if gather != nil {
+		w = gather
+	}
 	h := w.Header()
 	for _, k := range []string{"Content-Type", "Request-Id", "X-Request-Id"} {
 		if v := res.Header.Get(k); v != "" {
@@ -4180,6 +4240,14 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if sse {
 		sniff.drain()
 	}
+	if gather != nil {
+		cut := ""
+		if rerr != nil && rerr != io.EOF {
+			cut = cutMidReply(p.Name, rerr)
+		}
+		status, msg := gather.finish(client, p, sse, cut, sniff.failed)
+		return status, msg, true
+	}
 	if sse && r.Context().Err() == nil && !sniff.whole() {
 		// the upstream died mid-reply, or ended it short of its last
 		// event: say so in the stream rather than end it as if whole,
@@ -4291,7 +4359,7 @@ func (s *Server) usable(p provider.Provider, model string) []provider.Protocol {
 	apis := p.APIs(model)
 	var out []provider.Protocol
 	for _, proto := range p.Speaks() {
-		if s.fits(p.ID, model, proto) && (apis == nil || slices.Contains(apis, proto)) {
+		if s.fits(p.ID, model, proto) && (apis == nil && !p.NamedOnlyOn(proto) || slices.Contains(apis, proto)) {
 			out = append(out, proto)
 		}
 	}
@@ -4686,7 +4754,7 @@ const tierField = "service_tier"
 // vendor, Kimi's and Qwen's thinking switches) take that a request does
 // without: an upstream that refuses one by name is asked again without it.
 var optionalFields = []string{"store", "metadata", tierField, cacheKeyField, "prompt_cache_retention",
-	"safety_identifier", "stream_options", "parallel_tool_calls", "verbosity", "thinking", "enable_thinking"}
+	"prompt_cache_options", "safety_identifier", "stream_options", "parallel_tool_calls", "verbosity", "thinking", "enable_thinking"}
 
 // refusedOptional lists optional fields an upstream explicitly rejects as
 // unsupported. An invalid value must reach the client without dropping the
@@ -4718,6 +4786,12 @@ func refusedOptional(status int, msg, body []byte) []string {
 var unknownOptionalField = regexp.MustCompile("(?i)\\b(?:unknown (?:name|field|parameter)|unsupported (?:parameter|field|property|argument)|unrecognized (?:request )?(?:argument|parameter)(?: supplied)?):?\\s*['\"\\x60]([a-z_]+)['\"\\x60]")
 var unquotedUnsupportedOptionalField = regexp.MustCompile("(?i)\\bunsupported (?:parameter|field|property|argument):\\s*([a-z_]+)\\b")
 var rejectedOptionalField = regexp.MustCompile("(?i)(?:^|\\b(?:parameter|field|property|argument)\\s+)['\"\\x60]([a-z_]+)['\"\\x60]\\s+(?:is\\s+)?(?:unsupported|not supported)\\b")
+
+// leadingRejectedOptionalField is a message that starts with the field's
+// bare name: OpenAI's "prompt_cache_options is not supported on this
+// model" (#2154). Only at the start, so a field named further on, in an
+// echo of the input, is not taken for it.
+var leadingRejectedOptionalField = regexp.MustCompile("(?i)^\\s*([a-z_]+)\\s+is\\s+(?:unsupported|not supported)\\b")
 
 func unsupportedOptionalField(fault any, field string) bool {
 	switch v := fault.(type) {
@@ -4766,6 +4840,9 @@ func unsupportedOptionalField(fault any, field string) bool {
 			if match[1] == field {
 				return true
 			}
+		}
+		if match := leadingRejectedOptionalField.FindStringSubmatch(v); match != nil && match[1] == field {
+			return true
 		}
 	case []any:
 		for _, item := range v {

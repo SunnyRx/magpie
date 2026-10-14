@@ -185,10 +185,13 @@ function notJSON(res, text) {
   return t("A proxy in front of magpie answered, not magpie ({what})", { what });
 }
 
+// el makes a tag with a class and its content: text, or a node put inside
+// it as it is, never written out as "[object HTMLButtonElement]" (#2181).
 function el(tag, cls, text) {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
+  if (text instanceof Node) e.append(text);
+  else if (text !== undefined) e.textContent = text;
   return e;
 }
 // replaceKeeping is parent.replaceChildren(...nodes) that leaves a node
@@ -3509,7 +3512,9 @@ function openRowMenu(anchor, acts) {
     if (o.tip) b.title = o.tip;
     // an item that is off can say why, under its name and as its title
     if (o.why) { b.classList.add("has-why"); b.title = o.why; b.querySelector(".rm-name").append(el("span", "rm-why", o.why)); }
-    b.onclick = (e) => { e.stopPropagation(); closeAgentMenu(); o.run(); };
+    // the click goes along, so an item that opens something below can
+    // bring it into view (scrollOnPurpose)
+    b.onclick = (e) => { e.stopPropagation(); closeAgentMenu(); o.run(e); };
     b.onmouseenter = () => b.focus({ preventScroll: true });
     box.append(b);
     if (!o.off) items.push(b);
@@ -4347,11 +4352,21 @@ function placePop(anchor, w, h) {
     pop.classList.add("up");
     pop.style.top = "auto";
     pop.style.bottom = innerHeight - r.top + 5 + "px";
+    holdPop(pop, r.top - 5 - top);
     return;
   }
   if (y + h > innerHeight - pad) y = Math.max(top, innerHeight - pad - h);
   pop.style.bottom = "auto";
   pop.style.top = y + "px";
+  holdPop(pop, innerHeight - pad - y);
+}
+
+// holdPop keeps the pop to the room it was placed in: on a phone it may
+// grow to the window's height (body.web), more than the h it was placed
+// by, and a model picker opened upward ran off the top, its filter and
+// first rows out of reach.
+function holdPop(pop, room) {
+  if (!(parseFloat(getComputedStyle(pop).maxHeight) <= room)) pop.style.maxHeight = room + "px";
 }
 
 // ultracodeToggle: Claude Code's ultracode as a square that a click turns
@@ -4429,9 +4444,13 @@ function openPicker(agent, field, anchor, ev, only) {
   if (again) return;
   const cur = field.value;
   let options = field.options.filter((o) => !only || only(o));
-  // routing groups come first, before the agent's own models and each
-  // provider's; only the picker's own choices (Automatic, Off) above them
-  options = [...options.filter((o) => o.reset), ...options.filter((o) => !o.reset && o.group === ROUTING_GROUPS), ...options.filter((o) => !o.reset && o.group !== ROUTING_GROUPS)];
+  // routing groups come first, then each provider's, then the models the
+  // agent asks for itself, not through magpie: Claude Code's own list of
+  // Claude models above them hid every magpie model below the fold (abledo
+  // on Discord: "claudecode的magpie模型选不了"). Only the picker's own
+  // choices (Automatic, Off) above them all
+  const rest = options.filter((o) => !o.reset && o.group !== ROUTING_GROUPS);
+  options = [...options.filter((o) => o.reset), ...options.filter((o) => !o.reset && o.group === ROUTING_GROUPS), ...rest.filter((o) => !o.direct), ...rest.filter((o) => o.direct)];
   const effortPicker = !only && (field.key === "effort" || field.label === "effort" || field.label === "thinking" || field.label === SUB_EFFORT || roleLevel(field.label));
   options = oneRowPerModel(options, cur);
   // Current model first, then the rest in catalog order. Effort levels keep
@@ -13769,6 +13788,9 @@ function closeProtoMenu() {
 // whose header takes two rows.
 function scrollCloses(box, e) {
   if (box.contains(e.target)) return false;
+  // a box scrolling its own text (a long one goes back to its start as it
+  // loses focus to the click that opened the menu) moves nothing
+  if (e.target.matches?.("input, textarea")) return false;
   return !e.target.classList?.contains("view") || performance.now() < purposeUntil && purposeUntil !== guardUntil;
 }
 // openProtoMenu picks one of opts, or several when value is a list: each
@@ -14349,17 +14371,23 @@ function quotasOpened() {
 // landed, so the tray panel, opened, shows what the window does without a
 // refresh by hand (#959). An answer the same as the last isn't drawn again.
 let quotasLoading = null, quotasLater = 0, quotasTries = 0;
+let quotaRefreshVersion = 0;
+const quotaRefreshVersions = new Map();
 function loadQuotas(asked, again) {
   if (quotasLoading && (!asked || quotasLoading.asked)) return quotasLoading;
   if (asked) quotasAskedAt = performance.now();
   if (!again) quotasTries = 0;
-  let reading = false, same = false;
+  let reading = false, same = false, began;
   const p = Promise.resolve(quotasLoading).catch(() => {})
-    .then(() => Promise.all([api("usage/quotas" + (asked ? "?asked=1" : ""), undefined, (h) => { reading = h.get("X-Magpie-Reading") === "1"; }), api("usage/quotas/history?days=45").catch(() => null)]))
+    .then(() => {
+      began = quotaRefreshVersion;
+      return Promise.all([api("usage/quotas" + (asked ? "?asked=1" : ""), undefined, (h) => { reading = h.get("X-Magpie-Reading") === "1"; }), api("usage/quotas/history?days=45").catch(() => null)]);
+    })
     .then(([q, h]) => {
       // an answer that isn't a list of cards is a read that failed: what
       // was read before stays, as it does when the read is refused
       if (q != null && !Array.isArray(q)) { quotas = quotas || []; reading = false; return; }
+      q = keepRefreshedQuotas(q || [], began);
       same =!!again && !!quotas && JSON.stringify(q || []) === JSON.stringify(quotas) && (!h || JSON.stringify(h) === JSON.stringify(quotaHist));
       quotas = q || []; quotasAt = Date.now(); if (h) quotaHist = h;
     }, () => { quotas = quotas || []; reading = false; })
@@ -14372,6 +14400,20 @@ function loadQuotas(asked, again) {
   p.asked = !!asked;
   quotasLoading = p;
   return p;
+}
+
+// A whole-page reply can have left the backend before a card's refresh
+// completed. Keep each card refreshed since this read began, including a
+// card the older reply did not yet contain. A later read may replace it.
+function keepRefreshedQuotas(next, began) {
+  for (const [key, version] of quotaRefreshVersions) if (version <= began) quotaRefreshVersions.delete(key);
+  const kept = new Map((quotas || []).filter(q => quotaRefreshVersions.has(usageAcctKey(q))).map(q => [usageAcctKey(q), q]));
+  const out = next.map(q => {
+    const key = usageAcctKey(q), newer = kept.get(key);
+    kept.delete(key);
+    return newer || q;
+  });
+  return out.concat([...kept.values()]);
 }
 
 // the period picker, in the page's head, for the Overview and Requests
@@ -15367,6 +15409,46 @@ function quotaCycle(l, now) {
   if (reset != null && reset <= now) reset = null;
   return { start: Math.min(start, now), reset };
 }
+// the week a pace is fitted over, as balanceTrend fits a balance's
+// (balanceFitSpan): what a window is spending now, not what its whole cycle
+// averaged, and never a run long enough to have changed its mind
+const quotaEtaSpan = 7 * 86400e3;
+// quotaEta: where a window's own readings are taking it — the points since
+// it last refilled, within the week, fitted to a line and carried to where
+// they meet zero: {out} the hour that is, {lasts} whether it is after the
+// reset. null where there is nothing to say: fewer than three readings, an
+// hour of them, nothing left, a line that is not falling, or one already
+// past zero. A shape in a 52px box cannot be read off; this can (#2079).
+function quotaEta(l, now) {
+  const c = l.cycle || quotaCycle(l, now);
+  // a cycle already over (a past one picked) has no pace left to tell
+  if (c.reset != null && c.reset <= now) return null;
+  const cycle = l.points.filter((p) => p.at >= c.start && p.at <= now);
+  let i = cycle.length - 1;
+  while (i > 0 && cycle[i - 1].left >= cycle[i].left && now - cycle[i - 1].at <= quotaEtaSpan) i--;
+  const pts = cycle.slice(i), last = pts[pts.length - 1];
+  if (pts.length < 3 || !last || !(last.left > 0) || last.at - pts[0].at < 3600e3) return null;
+  const t0 = pts[0].at, n = pts.length;
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (const p of pts) { const x = (p.at - t0) / 86400e3; sx += x; sy += p.left; sxx += x * x; sxy += x * p.left; }
+  const den = n * sxx - sx * sx;
+  if (!(den > 0)) return null;
+  const slope = (n * sxy - sx * sy) / den; // what is left a day, falling
+  if (!(slope < 0)) return c.reset ? { lasts: true, out: null } : null;
+  const out = t0 + (-(sy - slope * sx) / n / slope) * 86400e3;
+  if (!(out > now)) return null;
+  return { out, lasts: !!c.reset && out >= c.reset };
+}
+// quotaEtaText: that pace as one phrase — the hour the window empties, in
+// the reader's own clock, or the reset it outlasts. A shape in a 52px plot
+// cannot be read off; this answers the only question the curve is asked
+// (#2079)
+function quotaEtaText(l, now) {
+  const p = l && quotaEta(l, now);
+  if (!p) return "";
+  return p.lasts ? t("Lasts past the reset at this pace")
+    : t("Runs out {when} at this pace", { when: quotaTimeText(Math.max(p.out, now + 60e3), now) });
+}
 function quotaSpan(lines, range, now) {
   if (range === "2d") return [now - 48 * 3600e3, now];
   let x0 = Infinity, x1 = now;
@@ -15452,7 +15534,8 @@ function quotaCurve(sub) {
   const range = el("button", "text qc-range");
   range.type = "button";
   const key = usageAcctKey(sub);
-  head.append(el("span", "", t("Left over time")), range);
+  const pace = el("span", "qc-pace");
+  head.append(el("span", "", t("Left over time")), pace, range);
   const W = 300, H = 60;
   const g = sv("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", class: "qc-plot", role: "img" });
   curveZoom(box, g);
@@ -15504,6 +15587,21 @@ function quotaCurve(sub) {
     g.setAttribute("aria-label", t("Left over time") + " · " + r);
     axis.replaceChildren(el("span", "", picked ? quotaCycleDate(x0) : quotaTimeText(x0, now)), el("span", "", picked ? quotaCycleDate(x1) : quotaTimeText(x1, now)));
     drawLegend(shown, now);
+    // The window whose deadline is furthest off answers for the card: the
+    // head has room for the pace a shape in 52px only hints at (#2079). It
+    // is the window the legend's last key is, and a window with no readings
+    // of the picked cycle carries a cycle of nothing to be asked about. A
+    // past cycle picked has no pace to tell: it is over.
+    let longest = null, latest = -Infinity;
+    if (!picked) shown.forEach((l) => {
+      const c = l.cycle || quotaCycle(l, now);
+      if (c?.reset != null && c.reset > latest) { latest = c.reset; longest = l; }
+    });
+    const p = longest ? quotaEta(longest, now) : null;
+    pace.textContent = p ? quotaEtaText(longest, now) : "";
+    // which window it is, and the instant with its year, behind a line
+    // that holds day and minute and is cut short rather than wrapped
+    pace.title = p ? [shown.length > 1 ? longest.label : "", pace.textContent, p.out != null ? new Date(p.out).toLocaleString(intlLang()) : ""].filter(Boolean).join("\n") : "";
   };
   box.append(head, g, axis, legend);
   box.draw();
@@ -15609,6 +15707,12 @@ function setQuotaRange(id) {
   // A range also restores today's meters when leaving a historical cycle.
   renderQuotas();
 }
+// quotaWindowLine: the readings one of a card's own windows is drawn from —
+// the line quotaSpark's thin curve is, and the one its pace is read from
+function quotaWindowLine(q, w) {
+  if (!w) return null;
+  return quotaLines({ ...q, windows: [w.window ? { ...w, name: w.window } : w] })[0] || null;
+}
 // quotaSpark: the tray card's line of a window's current cycle, the even
 // burn faint under it; none while the curves are off. In a card's width a
 // month drawn in a few pixels' height read as one straight line, its dashes
@@ -15619,16 +15723,16 @@ function setQuotaRange(id) {
 let sparkClips = 0;
 function quotaSpark(q, w) {
   if (quotaRange === "off") return null;
-  const lines = quotaLines({ ...q, windows: [w.window ? { ...w, name: w.window } : w] });
-  if (!lines.length) return null;
-  const now = Date.now(), c = quotaCycle(lines[0], now);
+  const line = quotaWindowLine(q, w);
+  if (!line) return null;
+  const now = Date.now(), c = quotaCycle(line, now);
   const x1 = c.reset || now;
   if (!(c.start < x1)) return null;
   const W = 200, H = 30;
   const g = sv("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", class: "pq-spark", role: "img" });
   g.setAttribute("aria-label", t("{name}: this cycle", { name: t(w.name) }));
-  drawQuotaPlot(g, lines, c.start, x1, W, H, now, true);
-  const gap = c.reset && sparkGap(lines[0].points, c.start, c.reset, now, W, H);
+  drawQuotaPlot(g, [line], c.start, x1, W, H, now, true);
+  const gap = c.reset && sparkGap(line.points, c.start, c.reset, now, W, H);
   if (gap) g.prepend(gap);
   const s = el("span", "pq-spark-box");
   s.title = t("{name}: what was left this cycle, against an even burn", { name: t(w.name) });
@@ -16292,11 +16396,11 @@ async function hidePanelUsage(key, hide) {
   }
 }
 
-// asOfText: an allowance standing in for one that couldn't be read just
-// now (a vendor rate limiting its usage endpoint) says when it was read.
+// asOfText dates a cached allowance and distinguishes a deliberate skip
+// from a failed read (such as the vendor rate limiting its usage endpoint).
 function asOfText(q, short = false) {
   const text = short ? t("As of {when}", { when: stamp(q.asOf) })
-    : t("As of {when} — couldn't be read just now", { when: new Date(q.asOf).toLocaleString(intlLang()) });
+    : t(q.readDeferred ? "As of {when} — not refreshed this time" : "As of {when} — couldn't be read just now", { when: new Date(q.asOf).toLocaleString(intlLang()) });
   return q.windows?.some((w) => w.resetsAt && new Date(w.resetsAt).getTime() <= Date.now())
     ? text + " · " + t("A cached window has expired; current allowance is unknown") : text;
 }
@@ -16336,13 +16440,23 @@ function panelQuotaCard(q) {
   const ws = fam.slice(0, fam.some((w) => w.members) ? 4 : 3);
   // when the windows begun start again: the first bare, the others by name
   const begun = ws.filter((w) => w.resetsAt && w.used > 0);
-  card.append(el("span", "pq-sub", begun.length
+  const sub = el("span", "pq-sub", begun.length
     ? begun.map((w, i) => {
       const at = new Date(w.resetsAt);
       return at <= Date.now() ? (i || w.members ? ringName(w) + " " : "") + resetText(at)
         : (i || w.members ? ringName(w) + " " : "↻ ") + resetClock(at);
     }).join(" · ")
-    : t("Not used yet")));
+    : t("Not used yet"));
+  // The first window's own pace as well, in the line already about its
+  // deadline: the thin line under it has no room for what it only hints at,
+  // and a card with no readings of that window has nothing to say (#2079).
+  // Only while that line is drawn (curves on), and only when the deadline
+  // the line names is that window's alone: after "↻ 14:26 · Weekly Oct 31"
+  // it would read as the week's.
+  const line = quotaRange !== "off" && begun.length === 1 && begun[0] === ws[0] && !ws[0].tiers ? quotaWindowLine(q, ws[0]) : null;
+  const pace = line ? quotaEtaText(line, Date.now()) : "";
+  if (pace) sub.append(el("span", "pq-pace", " · " + pace));
+  card.append(sub);
   const rings = el("span", "pq-rings");
   for (const w of ws) {
     const used = Math.max(0, Math.min(100, w.used));
@@ -17010,7 +17124,19 @@ function quotaRefresh(q) {
     b.classList.add("busy");
     try {
       const qs = await api("usage/quotas/refresh?provider=" + encodeURIComponent(q.provider) + (q.user ? "&user=" + encodeURIComponent(q.user) : ""), {});
-      if (Array.isArray(qs)) { quotas = qs; quotasAt = Date.now(); }
+      const fresh = Array.isArray(qs) && qs.find(x => usageAcctKey(x) === key);
+      if (fresh) {
+        quotaRefreshVersions.set(key, ++quotaRefreshVersion);
+        // The reply includes every card, but only this one was refreshed.
+        // Another card may have completed its own refresh in the meantime.
+        const kept = quotas || [];
+        quotas = kept.some(x => usageAcctKey(x) === key) ? kept.map(x => usageAcctKey(x) === key ? fresh : x) : [...kept, fresh];
+        quotasAt = Date.now();
+      } else if (Array.isArray(qs)) {
+        // The card came back under another key (an account first read
+        // under its name): the reply's list is taken as it was before.
+        quotas = qs; quotasAt = Date.now();
+      }
     } catch (err) {
       status(err.message, "err");
     } finally {
@@ -21032,6 +21158,19 @@ function renderSettings() {
     (v) => savePrefs({ ...keep, noWSLAgents: v === "off" })));
   renderSessionTerminal(s, keep);
   renderBarIcon();
+  // what each row does, kept in its tooltip, the row saying its name
+  // alone as Settings › General does (#2120); Open at login's says where
+  // the Mac lists it: a launch agent, under App Background Activity
+  for (const [row, en] of [
+    ["#codexTitlesRow", "Names each thread in a hidden request of its own; at Codex’s own, it goes as Codex sends it, through its ChatGPT sign-in"],
+    ["#codexDescriptionsRow", "Writes each thread’s short description in a hidden request of its own; at Codex’s own, it goes as Codex sends it, through its ChatGPT sign-in"],
+    ["#codexPredictionsRow", "Guesses your next message for the composer, reading the whole conversation again each time; at Codex’s own, it goes on the thread’s model through its ChatGPT sign-in"],
+    ["#codexAutoReviewRow", "Decides an approval in your place when Codex’s approvals are on auto-review; Codex’s own pick is codex-auto-review, else the conversation’s model at low effort"],
+    ["#codexMemoriesRow", "Writes Codex’s memories of past threads, in the background; Codex’s own: gpt-5.6-terra, with gpt-5.6-luna summing up each thread"],
+    ["#loginRow", document.body.classList.contains("mac")
+      ? "Opens in the menu bar with no window. System Settings › General › Login Items lists it under App Background Activity, not Open at Login"
+      : "Opens in the tray with no window"],
+  ]) $(row + " .who").title = t(en);
   // the system's record, set on its own, not with the other choices
   $("#loginSegs").replaceChildren(segs([["off", t("Off")], ["on", t("On")]], s.login ? "on" : "off", (v) =>
     writingPrefs(api("settings/login", { on: v === "on" })).then((ns) => { prefs = ns; renderSettings(); }).catch((e) => { status(t(e.message), "err"); renderSettings(); })));
@@ -24225,6 +24364,11 @@ function hold(h) {
   if (Math.abs(d) >= 1) {
     let want = v.scrollTop + d;
     const max = v.scrollHeight - v.clientHeight;
+    // a view at its top when clicked stays at its top: what comes in above
+    // what was clicked moves it down rather than scrolling the view to follow
+    // it. Turning automatic updates off grew the Version row above the
+    // switch once the save answered, and the view slid 2px off its top (#2134)
+    if (h.top && want > 0) want = 0;
     // a view at its top when clicked stays there rather than be given room
     // to scroll down: a chip saved in the panel's Profiles came in above the
     // button held, and room made for the button slid the chip up under the

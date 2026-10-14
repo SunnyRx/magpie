@@ -150,6 +150,24 @@ func (m model) updateProviders(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		pr := provider.Preset(p.Preset)
+		if pr != nil && pr.Kind == provider.KindLocal {
+			id, name := p.ID, p.Name
+			now := provider.AddressOf(p.Chat, p.Responses, p.Anthropic)
+			m.openAsk(localAddressAsk(*pr, []string{"providers", name, "address"}, now, func(v string) tea.Cmd {
+				q := p
+				_ = q.AtAddress(v)
+				// the address it opened with: URLs set apart (an Anthropic
+				// URL on another host) aren't moved onto the first one's
+				if at := provider.AddressOf(q.Chat, q.Responses, q.Anthropic); v == "" || at == now {
+					return func() tea.Msg { return flashMsg{text: name + " address unchanged", ok: true} }
+				}
+				return saveProvider(id, func(p *provider.Provider) {
+					_ = p.AtAddress(v)
+					provider.ForgetBalances()
+				}, name+" address "+provider.AddressOf(q.Chat, q.Responses, q.Anthropic))
+			}))
+			return m, nil
+		}
 		if pr == nil || pr.Endpoint == "" {
 			m.flash, m.flashOK = p.Name+" is asked at its vendor's address · magpie provider set "+p.ID+" url=… changes a custom one's", false
 			return m, nil
@@ -371,7 +389,10 @@ func (m *model) openProviderModels(id string) {
 		input:  newInput("filter models"),
 		items:  modelOptions(id),
 		relist: func() []agent.Option { return modelOptions(id) },
-		empty:  "no models known yet · m on the providers list asks the vendor for them",
+		empty:  "no models known yet · ctrl+r asks the vendor for them",
+		// the list asked again from here, where its models are looked at
+		// (#2113), as m does on the providers list
+		refetch: func() tea.Cmd { return refetchCmd(id) },
 		toggle: func(model string) ([]agent.Option, string, bool) {
 			p, err := provider.Find(id)
 			if err != nil {
@@ -462,6 +483,16 @@ func (m *model) openPresets() {
 					return askMsg{endpointAsk(*pr, []string{"providers", "add", p.Name, "address"}, "", func(addr string) tea.Cmd {
 						return func() tea.Msg {
 							p.Chat, p.Responses = addr, addr
+							return askMsg{addKeyAsk(p)}
+						}
+					})}
+				}
+				// a local server can listen on another port, or be another
+				// computer's: asked first, Enter alone keeping the preset's
+				if pr := provider.Preset(id); pr != nil && pr.Kind == provider.KindLocal {
+					return askMsg{localAddressAsk(*pr, []string{"providers", "add", p.Name, "address"}, "", func(addr string) tea.Cmd {
+						return func() tea.Msg {
+							_ = p.AtAddress(addr)
 							return askMsg{addKeyAsk(p)}
 						}
 					})}
@@ -600,6 +631,22 @@ func endpointAsk(pr provider.PresetDef, crumbs []string, now string, then func(s
 					need = "Your resource's endpoint is needed"
 				}
 				return func() tea.Msg { return flashMsg{text: need} }
+			}
+			return then(v)
+		}}
+}
+
+// localAddressAsk asks where a local server's preset (KindLocal) is
+// reached, now being what it has; the preset's own address is the
+// placeholder. Enter alone keeps it, and a refused address is said.
+func localAddressAsk(pr provider.PresetDef, crumbs []string, now string, then func(string) tea.Cmd) ask {
+	in := newInput(provider.AddressOf(pr.Chat, pr.Responses, pr.Anthropic))
+	in.SetValue(now)
+	return ask{crumbs: crumbs, input: in, empty: true,
+		hint: "where the server listens: another port, or another computer's address",
+		onEnter: func(v string) tea.Cmd {
+			if _, err := provider.AtAddress(pr, v); err != nil {
+				return func() tea.Msg { return flashMsg{text: err.Error()} }
 			}
 			return then(v)
 		}}
@@ -905,7 +952,14 @@ func (m model) updateUsage(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	i := slices.Index(periods, m.period)
 	switch msg.String() {
 	case "u":
+		// the choice is Settings' QuotaLeft, which the app and the menu bar
+		// read too: u turns it for them as well (#122)
 		m.qleft = !m.qleft
+		s := settings.Load()
+		s.QuotaLeft = m.qleft
+		if err := settings.Save(s); err != nil {
+			m.flash, m.flashOK = err.Error(), false
+		}
 		return m, nil
 	case "c":
 		// WorkBuddy's daily check-in, as the app's "Check in now"
@@ -1185,8 +1239,10 @@ func quotaLines(qs []provider.SubscriptionQuota, asked, left bool, width int, no
 			if r.Until != nil {
 				c += sFaint.Render(" until " + provider.ResetClock(*r.Until, now))
 			}
-			if provider.AutoResets(q.Provider, q.User) {
-				c += sFaint.Render(" · auto") // spent by itself once the week is used up
+			if q.Provider == "codex" {
+				if auto := provider.AutoResetWords(q.User); auto != "" {
+					c += sFaint.Render(" · " + auto) // spent by itself: its week used up, before one expires, or both
+				}
 			}
 			cells = append(cells, c)
 		}

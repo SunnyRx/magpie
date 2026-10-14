@@ -741,7 +741,7 @@ func wslAgent(k wslKind, d distro) *Agent {
 // files, which starts the distro.
 func asleep(live *Agent, k wslKind, d distro) *Agent {
 	started := false
-	a := &Agent{ID: live.ID, Name: live.Name, Icon: live.Icon, WSL: d.Name, detect: live.detect, Spelled: live.Spelled, ModelAliases: live.ModelAliases,
+	a := &Agent{ID: live.ID, Name: live.Name, Icon: live.Icon, WSL: d.Name, detect: live.detect, Spelled: live.Spelled, ModelAliases: live.ModelAliases, NoNames: live.NoNames,
 		Notice: func() string {
 			if started {
 				return live.Notice()
@@ -750,7 +750,7 @@ func asleep(live *Agent, k wslKind, d distro) *Agent {
 		}}
 	for _, lf := range live.Fields {
 		key := lf.Key
-		f := Field{Key: key, Label: lf.Label, Quiet: lf.Quiet, Follows: lf.Follows, Options: lf.Options,
+		f := Field{Key: key, Label: lf.Label, Quiet: lf.Quiet, Live: lf.Live, Follows: lf.Follows, Options: lf.Options,
 			Get: func() string { return wslLastSeen(d.Name, k.memo(key)) },
 			Set: func(v string) error {
 				// opening a stopped distro's files is aborted rather than

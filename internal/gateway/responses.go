@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -515,9 +516,16 @@ func toolResultItem(t string) bool {
 //
 // An item that carries a call_id is part of an exchange and never moves,
 // whatever its type. Before the run's first result, what the model wrote
-// between its own calls (reasoning, its text, a hosted tool's call) is its
-// step and stays; anything else there (a subagent's agent_message, a note)
-// moves as it would between the results. A call opens the run only when a
+// between its own calls is its step: reasoning and a hosted tool's call
+// stay, and its text (an assistant message) goes ahead of the run's first
+// call, with the reasoning right before it, so the step's calls stand
+// together. OpenCode Go turns a relayed request into chat with each
+// assistant message after a call opening a new assistant message, so
+// [text, call_a, text, call_b, out_a, out_b], what Codex keeps when the
+// model wrote a line before each call of a batch, reached it as two
+// messages with tool_calls and the first answered by nothing: "No tool
+// output found for tool call call_a" (#2100). Anything else there (a
+// subagent's agent_message, a note) moves as it would between the results. A call opens the run only when a
 // result after it answers it: a call nothing answers is pairToolItems'
 // (#1341), and one answered before it is not waited on. An item between two
 // whole exchanges stays where it is, and a request with nothing inside a
@@ -562,12 +570,15 @@ func joinToolRuns(body []byte) []byte {
 			strings.HasSuffix(it.Type, "_call")
 	}
 	out := make([]json.RawMessage, 0, len(input))
+	kinds := make([]item, 0, len(input)) // what each item of out is
 	var held []json.RawMessage
 	moved := false
 	// open: calls of the run in progress whose result is still ahead;
-	// answering: a result of the run has come
+	// answering: a result of the run has come; first: where in out the
+	// run's first call is
 	open := map[string]bool{}
 	answering := false
+	first := 0
 	for i, raw := range input {
 		it := items[i]
 		switch {
@@ -578,15 +589,34 @@ func joinToolRuns(body []byte) []byte {
 			}
 		case it.CallID != "":
 			if answeredLater[i] {
+				if len(open) == 0 {
+					first = len(out)
+				}
 				open[it.CallID] = true
 			}
 		case len(open) > 0 && (answering || !modelsOwn(it)):
 			held, moved = append(held, raw), true
 			continue
+		case len(open) > 0 && it.Type == "message":
+			// the model's text between its calls goes ahead of the
+			// first, the reasoning it follows with it
+			from := len(out)
+			for from > first && kinds[from-1].Type == "reasoning" {
+				from--
+			}
+			seg := append(append([]json.RawMessage(nil), out[from:]...), raw)
+			segKinds := append(append([]item(nil), kinds[from:]...), it)
+			out = slices.Insert(out[:from], first, seg...)
+			kinds = slices.Insert(kinds[:from], first, segKinds...)
+			first += len(seg)
+			moved = true
+			continue
 		}
 		out = append(out, raw)
+		kinds = append(kinds, it)
 		if len(open) == 0 {
 			out = append(out, held...)
+			kinds = append(kinds, make([]item, len(held))...)
 			held, answering = nil, false
 		}
 	}
@@ -1295,6 +1325,11 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 		Message string `json:"message"`
 	}
 	if err := decodeJSON([]byte(data), &ev); err != nil {
+		// an error in a shape of its own is still the reply's end (#1933)
+		if e, ok := carriedError(data); ok {
+			d.endCall(emit)
+			emit(e)
+		}
 		return nil
 	}
 	switch ev.Type {
@@ -1357,8 +1392,14 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 		}
 	case "response.completed", "response.incomplete", "response.failed":
 		d.endCall(emit)
-		if ev.Response.Error != nil {
-			emit(Event{Kind: KError, Text: ev.Response.Error.Message, Code: refusedCode(data)})
+		if ev.Response.Error != nil || ev.Type == "response.failed" || ev.Response.Status == "failed" {
+			// a failed response is an error with or without the words
+			// for it, never a whole reply (#1933)
+			msg := ""
+			if ev.Response.Error != nil {
+				msg = ev.Response.Error.Message
+			}
+			emit(Event{Kind: KError, Text: cmp.Or(msg, streamErrorText(data)), Code: refusedCode(data)})
 			return nil
 		}
 		stop := "stop"
@@ -1383,9 +1424,9 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 		d.endCall(emit)
 		msg := ev.Message
 		if ev.Error != nil {
-			msg = ev.Error.Message
+			msg = cmp.Or(ev.Error.Message, msg)
 		}
-		emit(Event{Kind: KError, Text: msg, Code: refusedCode(data)})
+		emit(Event{Kind: KError, Text: cmp.Or(msg, streamErrorText(data)), Code: refusedCode(data)})
 	}
 	return nil
 }
@@ -1608,6 +1649,17 @@ func (e *responsesEncoder) event(ev Event) {
 		e.send("response.output_item.added", map[string]any{"output_index": e.item, "item": raw})
 		e.send("response.output_item.done", map[string]any{"output_index": e.item, "item": raw})
 		e.output = append(e.output, raw)
+	case KSearch:
+		// A search arrives whole, after it ran. Tell the client its query
+		// and sources, as Anthropic's encoder does, without inventing
+		// earlier in-progress events or citation offsets in the answer.
+		e.closeItem()
+		e.item++
+		item := responsesSearchItem(ev.Text, ev.Hits)
+		e.send("response.output_item.added", map[string]any{"output_index": e.item, "item": item})
+		e.send("response.web_search_call.completed", map[string]any{"output_index": e.item, "item_id": item["id"]})
+		e.send("response.output_item.done", map[string]any{"output_index": e.item, "item": item})
+		e.output = append(e.output, item)
 	case KToolStart:
 		if ev.ID == "" {
 			ev.ID = "call_" + newID()
@@ -1668,6 +1720,21 @@ func (e *responsesEncoder) finish() {
 	e.send(typ, map[string]any{"response": e.response(status, extra)})
 }
 
+// responsesSearchItem keeps a completed search in both Responses reply forms.
+// Keep query for older clients and queries for clients using the current API.
+func responsesSearchItem(query string, hits []Hit) map[string]any {
+	sources := make([]map[string]any, 0, len(hits))
+	for _, h := range hits {
+		if h.URL != "" {
+			sources = append(sources, map[string]any{"type": "url", "url": h.URL})
+		}
+	}
+	return map[string]any{
+		"id": "ws_" + newID(), "type": "web_search_call", "status": "completed",
+		"action": map[string]any{"type": "search", "query": query, "queries": []string{query}, "sources": sources},
+	}
+}
+
 // renderResponses is the non-streaming reply.
 func renderResponses(res Result, model string, named map[string]nsTool) []byte {
 	output := []any{}
@@ -1699,6 +1766,8 @@ func renderResponses(res Result, model string, named map[string]nsTool) []byte {
 				"call_id": id, "arguments": argsString(p)}, p.Name, named)
 			item["id"] = itemPrefix(item) + newID()
 			output = append(output, item)
+		case Search:
+			output = append(output, responsesSearchItem(p.Text, p.Hits))
 		}
 	}
 	id := res.ID

@@ -11,19 +11,20 @@ three.
 
 | Part | Responsibility | Source |
 | --- | --- | --- |
-| Native host | `Run` starts the Wails v3 app: the tray icon, the panel, the main window, single-instance handover, `magpie://` import links and open at login. `host` implements `Windows` for the API: show and hide, open URLs and folders, copy to the clipboard, fit and tint the panel, and set the text size. | [`app.go`](../../internal/gui/app.go), [`mainwindow.go`](../../internal/gui/mainwindow.go), [`traymenu.go`](../../internal/gui/traymenu.go) |
+| Native host | `Run` starts the Wails v3 app: the tray icon, the panel, the main window, single-instance handover, `magpie://` import links and open at login. `host` implements `Windows` for the API: show and hide, open URLs and folders, copy to the clipboard, fit and tint the panel, and set the text size. A copy on Linux sets PRIMARY before CLIPBOARD, since GTK 3 serves CLIPBOARD empty when PRIMARY is set after it on a compositor with no primary selection (KDE Plasma with middle-click paste off, #1881); on Wayland the copy is read back through the compositor, and one that doesn't read back whole answers `/api/copy` with 501, so the page tries its clipboard API, then the copy command, then says the copy failed with the text to copy by hand (`copy-fallback.test.cjs`). | [`app.go`](../../internal/gui/app.go), [`clipboard_gtk3.go`](../../internal/gui/clipboard_gtk3.go), [`clipboard_gtk3.h`](../../internal/gui/clipboard_gtk3.h), [`mainwindow.go`](../../internal/gui/mainwindow.go), [`traymenu.go`](../../internal/gui/traymenu.go) |
 | Backend | `startBackend` starts the gateway this process serves, unless another magpie already serves it. In that case this process only shows the other one's status (`gw` is nil). `stopServing` drains requests in flight. | [`backend.go`](../../internal/gui/backend.go) |
 | API and assets | `Handler` serves `assets/` (embedded with `//go:embed assets`) and the `/api/*` routes, such as `/api/state`, `/api/set` and `/api/agents/{action}/{id}`. `held` lets one API request's reads share one catalog build (`provider.Hold`), and drops it after any write. `revalidated` and `versionedPage` name each script by its content hash, so a cache never serves an old `app.js` under a new page; a file asked for under its current hash (`?v=`) is cached for good (`immutable`), anything else is revalidated by its ETag. | [`api.go`](../../internal/gui/api.go) |
 | Browser mode | `StartWeb` serves the page and the gateway for `magpie web`. The browser signs in with a run key in a link. Gateway mode shows Providers, Gateway, Routing, Usage, Sessions, Plugins and Settings on a machine that is only a gateway. `webHandler` gzips the page's text files and the API's JSON for a browser that takes gzip (`webCompressed`, with a `-gzip` ETag that still answers 304); the app's own windows read the page in-process and get it uncompressed. | [`web.go`](../../internal/gui/web.go), [`gatewaymode.go`](../../internal/gui/gatewaymode.go) |
-| The page | `app.js` keeps one state object per view and renders it into a list, with no framework. The views have their own files: `routing.js`, `library.js`, `plugins.js`, `sessions.js` and `context.js` (Usage's Context tab, and the context window card the Routing page draws under a request's story, fed by `/api/context` in `context.go`, which scores and tags each agent; clicking a part, a cell or an item opens its text from `/api/context/text`, the last 10 requests' masked bodies in memory (`openCtxText`), rendered 100 items and 20000 characters at a time; its "Tuned for you" cards are fed by `/api/tune` in `tune.go`, see [agent wiring](agent-wiring.md)). Strings go through `t()` with translations in `i18n.js` (zh, zh-TW, ja and de; the English text is the key and the fallback). zh-TW is Traditional Chinese with Taiwan's words; a system language of zh-TW, zh-HK, zh-MO or any zh-Hant picks it, and the tray menu and notifications follow (`trayLang`). Dropdowns use `openProtoMenu`. Every app menu (`openProtoMenu`, `openRowMenu`, `openSessCombo`) is placed by `placeMenu`: under its anchor, or over it when the window runs out below; one that fits neither way takes the larger room, its height held to it, and scrolls inside itself, and a scroll inside a menu doesn't close it (#1437, `removed-groups-menu-scroll.test.cjs`). The highest any popover goes is `popTop`: 8px under `header.top` on a Mac window, where the traffic lights are drawn over the page, and 8px from the top elsewhere; `placeMenu`, the field picker's `placePop` (which also holds `#pop`'s height to that room) and an agent's model list (`openAgentModels`) all use it (#1573, `popover-mac-chrome.test.cjs`). Scrolling is done only by `scrollOnPurpose(e)` with the reader's event. | [`assets/app.js`](../../internal/gui/assets/app.js), [`assets/i18n.js`](../../internal/gui/assets/i18n.js) |
-| Window navigation | In the window from 1024 points wide (`SIDE_AT`, the same width as app.css's `side-nav` rules), `layoutNav` moves the brand, the pages (`#nav`) and Settings into the sidebar (`#side`): the pages in four groups (Work, Models, Insights, Extend; a group none of whose pages shows, as in gateway mode, leaves out its name), the gateway's address at its foot (`sideGwRead`, read from `/api/providers` only while there is a sidebar), and the header a breadcrumb (`renderCrumb`). The open page's own tabs (`NAV_SUBS`: Usage, Library, Plugins, Settings) are listed under it as `.nav-s` rows (`role="tab"`, `data-of` the page tab's id) and the page's strip is hidden; a row's click clicks that tab at once, the selection (`.nav-hl`) having set off as the row was pressed (`navSubGlide`; back if the press leaves the row), and is the list's only shape: a row hovered or pressed has no ground of its own, and a `MutationObserver` draws the list again when the strip changes. A page's tabs share its one scroll, so a row that picks another tab opens it at its top (`scrollOnPurpose` with the row's click); the tab already open, picked again, leaves the page where it is (`sidebar-tab-top.test.cjs`). The list opens and folds with an iOS-like spring (`navSubEnter`, `navSubLeave`; none under reduced motion), and a folding list is out of reach at once. Narrower, the page beside a sidebar would be narrower than Usage's requests table needs (768 points), so they go back into the header's row, as a Mac sidebar gives way in a narrow window. At every width the reader can pick the sidebar or the header's tabs from the title bar's button (`#sideToggle`, ⌃⌘S or Ctrl+Shift+S; `toggleSideNav`), kept in localStorage `magpie.navLayout` (`side` or `top`) and so laid out from the first frame; none picked, the sidebar comes from `SIDE_AT`. Picked in a narrow window the sidebar is narrower (184 points under 860), and magpie web on a phone keeps its own tab bar and has no button. The two layouts trade places in a view transition (`navMorph`, app.css `.nav-morph`): the sidebar slides, each page's tab flies to its place in the other, and the page slides as one (its old image dropped, so no line prints twice); without view transitions, under reduced motion, or in the Linux app the change is at once: WebKitGTK with compositing off (`WEBKIT_DISABLE_COMPOSITING_MODE`, which `webkit_linux.go` sets under Wayland) crashes in a view transition. Elsewhere a transition still going after `MORPH_MAX` (1.5s) is skipped, so a webview that never ends one can't leave the window on the old layout's picture. See `side-toggle.test.cjs`. A window made wider or narrower drops what a click held (`heldWidth`): the page laid out again isn't the click's doing. The reader's own place is kept instead for a second while the page is laid out again (`relaid`, a `ResizeObserver` on the open page's parts calling `backToReader`): crossing `SIDE_AT` the browser clamps the scroll to each layout it passes through, and the page ended short of its foot (#1672, `text-size.test.cjs`). See `sidebar.test.cjs`. A sidebar longer than a short window keeps no scroll bar beside its pages: the native bars of `.side-scroll` and `.side-foot` are hidden, and `sideBars` lays a thin bar over each box's edge that shows while it scrolls, fades about a second after it stops (kept while hovered or dragged), can be dragged or clicked to page, and is gone when the box fits, the same in WebKit, WebView2 and WebKitGTK. See `sidebar-overlay-scrollbar.test.cjs`. | [`assets/app.js`](../../internal/gui/assets/app.js), [`assets/app.css`](../../internal/gui/assets/app.css) |
+| The page | `app.js` keeps one state object per view and renders it into a list, with no framework. The views have their own files: `routing.js`, `plugins.js` and `context.js`, and those a plugin adds under `assets/plugins/<id>/` (the Gateway, Sessions and Library pages, see [plugin runtime](plugin-runtime.md)) (Usage's Context tab, and the context window card the Routing page draws under a request's story, fed by `/api/context` in `context.go`, which scores and tags each agent; clicking a part, a cell or an item opens its text from `/api/context/text`, the last 10 requests' masked bodies in memory (`openCtxText`), rendered 100 items and 20000 characters at a time; its "Tuned for you" cards are fed by `/api/tune` in `tune.go`, see [agent wiring](agent-wiring.md)). Strings go through `t()` with translations in `i18n.js`, and a plugin's own in its `i18n.js` (zh, zh-TW, ja and de; the English text is the key and the fallback). zh-TW is Traditional Chinese with Taiwan's words; a system language of zh-TW, zh-HK, zh-MO or any zh-Hant picks it, and the tray menu and notifications follow (`trayLang`). Dropdowns use `openProtoMenu`. Every app menu (`openProtoMenu`, `openRowMenu`, `openSessCombo`) is placed by `placeMenu`: under its anchor, or over it when the window runs out below; one that fits neither way takes the larger room, its height held to it, and scrolls inside itself, and a scroll inside a menu doesn't close it (#1437, `removed-groups-menu-scroll.test.cjs`). The highest any popover goes is `popTop`: 8px under `header.top` on a Mac window, where the traffic lights are drawn over the page, and 8px from the top elsewhere; `placeMenu`, the field picker's `placePop` (which also holds `#pop`'s height to that room) and an agent's model list (`openAgentModels`) all use it (#1573, `popover-mac-chrome.test.cjs`). Scrolling is done only by `scrollOnPurpose(e)` with the reader's event. | [`assets/app.js`](../../internal/gui/assets/app.js), [`assets/i18n.js`](../../internal/gui/assets/i18n.js) |
+| Window navigation | In the window from 1024 points wide (`SIDE_AT`, the same width as app.css's `side-nav` rules), `layoutNav` moves the brand, the pages (`#nav`) and Settings into the sidebar (`#side`): the pages in four groups (Work, Models, Insights, Extend; a group none of whose pages shows, as in gateway mode, leaves out its name), the gateway's address at its foot (`sideGwRead`, read from `/api/providers` only while there is a sidebar), and the header a breadcrumb (`renderCrumb`). The open page's own tabs (`NAV_SUBS`: Usage, Library, Plugins, Settings) are listed under it as `.nav-s` rows (`role="tab"`, `data-of` the page tab's id) and the page's strip is hidden; a row's click clicks that tab at once, the selection (`.nav-hl`) having set off as the row was pressed (`navSubGlide`; back if the press leaves the row), and is the list's only shape: a row hovered or pressed has no ground of its own, and a `MutationObserver` draws the list again when the strip changes. A page's tabs share its one scroll, so a row that picks another tab opens it at its top (`scrollOnPurpose` with the row's click); the tab already open, picked again, leaves the page where it is (`sidebar-tab-top.test.cjs`). The list opens and folds with an iOS-like spring (`navSubEnter`, `navSubLeave`; none under reduced motion), and a folding list is out of reach at once. Narrower, the page beside a sidebar would be narrower than Usage's requests table needs (768 points), so they go back into the header's row, as a Mac sidebar gives way in a narrow window. At every width the reader can pick the sidebar or the header's tabs from the title bar's button (`#sideToggle`, ⌃⌘S or Ctrl+Shift+S; `toggleSideNav`), kept in localStorage `magpie.navLayout` (`side` or `top`) and so laid out from the first frame; none picked, the sidebar comes from `SIDE_AT`. Picked in a narrow window the sidebar is narrower (184 points under 860), and magpie web on a phone keeps its own tab bar and has no button. The two layouts trade places in a view transition (`navMorph`, app.css `.nav-morph`): the sidebar slides, each page's tab flies to its place in the other, and the page slides as one (its old image dropped, so no line prints twice); without view transitions, under reduced motion, or in the Linux app the change is at once: WebKitGTK with compositing off (`WEBKIT_DISABLE_COMPOSITING_MODE`, which `webkit_linux.go` sets under Wayland) crashes in a view transition. Elsewhere a transition still going after `MORPH_MAX` (1.5s) is skipped, so a webview that never ends one can't leave the window on the old layout's picture. See `side-toggle.test.cjs`. A window made wider or narrower drops what a click held (`heldWidth`): the page laid out again isn't the click's doing. The reader's own place is kept instead for a second while the page is laid out again (`relaid`, a `ResizeObserver` on the open page's parts calling `backToReader`): crossing `SIDE_AT` the browser clamps the scroll to each layout it passes through, and the page ended short of its foot (#1672, `text-size.test.cjs`). See `sidebar.test.cjs`. A sidebar longer than a short window keeps no scroll bar beside its pages: the native bars of `.side-scroll` and `.side-foot` are hidden, and `sideBars` lays a thin bar over each box's edge that shows while it scrolls, fades about a second after it stops (kept while hovered or dragged), can be dragged or clicked to page, and is gone when the box fits, the same in WebKit, WebView2 and WebKitGTK. See `sidebar-overlay-scrollbar.test.cjs`. The window opens on the page the reader last left, as a Mac app comes back as it was (molvqingtai and lc on Discord): `show` keeps the page in localStorage `magpie.lastView` (which the app's webview keeps across restarts, as it keeps `magpie.navLayout`), and `keptView` opens it at start. A page asked for in the address (`?view=`, the tray's links, a reload) wins, Agents too; a kept name that is no page opens the first page, and one gateway mode leaves out opens Providers (`show`). Opening on it scrolls nothing. See `last-page.test.cjs`. | [`assets/app.js`](../../internal/gui/assets/app.js), [`assets/app.css`](../../internal/gui/assets/app.css) |
+| Built-in plugins | Plugins › Built-in, the page's first tab (`drawBuiltin` in `plugins.js`, rows by `renderBuiltins` in `app.js`), lists magpie's built-in plugins, each with a name, a line on what it is and a switch: Routing groups, Library, Observability, Sessions, Warm-up and check-in, and the Gateway page (Essential). A plugin on with settings has their rows under its row, drawn from its schema by the kernel's `ui.form`, and a change posts `{id, config}`. The Gateway page is drawn by its plugin's own scripts through the window's kernel (`kernel.js`, `assets/plugins/gateway/`); see the [plugin runtime](plugin-runtime.md), "The window's kernel". They are `plugins/*` registered with the [plugin runtime](plugin-runtime.md); `GET /api/plugins/builtin` says each one (`builtinJSON`: on is active, the user's own choice, what of it is in use) and `POST {id, on}` (or `{id, config}`) writes plugins.yml. A page marks what goes with a plugin `data-feature="<id>"`. Off, `featureStyle` hides everything so marked (rows drawn later too), `navHides` leaves its page's tab out of the sidebar and the header, `show` opens Agents for an address kept for it, and `setSetTab`, `partShows` and `findSettings` leave its Settings tab and rows out, of the search too. One in use stays on: its switch is disabled and the row says what uses it, and the POST refuses it off. A plugins.yml that doesn't parse is said above the list and no switch moves. `boot.js` says which are off (`featuresOff`) and their settings (`pluginConfig`) before the first paint, and `settings.builtins` carries the list on every state read. The TUI doesn't follow them. See `builtins.test.cjs`, `builtins_test.go`. | [`builtins.go`](../../internal/gui/builtins.go), [`assets/plugins.js`](../../internal/gui/assets/plugins.js), [`assets/app.js`](../../internal/gui/assets/app.js) |
 | No GUI build | `-tags nogui` builds magpie without the GUI: `hasGUI` is false and `runGUI` says to use `magpie tui`. The files of `internal/gui` that need Wails build under `!nogui`. | [`gui_off.go`](../../internal/cli/gui_off.go) |
 
 ## Runtime path
 
 1. `magpie` with no arguments, `magpie app` or `magpie tray` calls `runGUI`, which calls `gui.Run`. A `nogui` build runs the TUI instead. A second launch hands over to the instance already running. On Windows, before any window is made, `webView2Check` asks Wails whether the WebView2 runtime is there (`Env.Info().PlatformInfo["WebView2"]`, "" when its lookup fails; a key Wails doesn't set counts as there). Without it Wails would exit on the first window with nothing on screen, so magpie logs it, shows a Windows message box in the reader's language naming the runtime, Microsoft's download page (`webView2Page`) and `magpie web` / `magpie tui`, opens the page on Yes, and `Run` ends (#1806, `webview2.go`, `TestWebView2MissingFromWails` on Windows). The box can't come from `ErrorHandler`, which runs on the thread Wails makes its windows on.
 2. `startBackend` brings up the gateway, or finds another magpie serving it.
-3. The panel and the window load `index.html` from `Handler`. `boot.js` passes the saved language, theme, text size and desktop font choices before the first paint.
+3. The panel and the window load `index.html` from `Handler`. `boot.js` passes the saved language, theme, colorblind mode, text size and desktop font choices before the first paint.
 4. The page reads `GET /api/state` and writes through `POST` routes. Each write answers with the new state, built under `held`.
 5. Closing the window hides it. On the Mac a full-screen window first leaves full screen (`closeStep`). The system's close on the panel (a title bar's X, Alt+F4, a window manager's close key) hides it as Escape does, so the tray icon opens it again; a panel lightweight mode let go, no longer `h.panel`, closes (`makePanel`, `TestPanelCloseHidesIt`). Lightweight mode lets go only of a window closed this way: one covered by another app's window, minimised, or open as magpie was hidden is still open (`windowUp`, not Wails' `IsVisible`, which is the occlusion state), and so is it for the Dock while the window is open and for a restart (#1381, `TestCoveredWindowStaysUp`). On the Mac the tray icon and a usage cell close an open panel by the same test (`windowOpen` in `togglePanelNow` and `trayCellClick`, not Wails' `ToggleWindow`), so under a window over the whole screen, such as a remote-desktop server's privacy curtain, the icon still closes the panel instead of showing it again (#1661, `TestTrayCellClickReleasedPanel`).
 6. The window opens as it was last left. Its settled size and whether it was maximised are kept in `settings.Window` and `settings.WindowMaximised` (`settle`; per machine, see `KeepOwn`). A maximised window keeps the size it restores to. `makeMain` opens it at that size (`openSize`). On its first show, `placeMain` maximises it again on the Mac and Windows (on Windows once the page has come). On Linux, `makeMain` makes it maximised with `StartState`. On Windows a size larger than the screen's work area is fitted and centred (`fitRoom`), and the larger size stays kept. The window's position is not kept.
@@ -31,6 +32,39 @@ three.
 8. On the Mac, Settings › Show in Dock puts magpie in the Dock never (the default: out of the Dock, and so out of Command-Tab), while the window is open (`DockWindow`) or always (`Dock`); a full-screen window joins it whatever the setting (`inDock`, `dockOnFullscreen`). `openMain` joins before it shows the window (`setDock` runs on the main thread at once). An app activated out of the Dock (the quick panel's focus) that then joins it stays last in Command-Tab's order though it is in front, so joining to the front activates magpie by way of the Dock (`dockStep`, `activateAgain`; #1381, `TestDockStep`, `TestDockJoinLeadsCommandTab`). It does so without asking NSApp whether magpie is active: the Mac makes it the front app at once, and NSApp says so only once the main thread has taken that in, after the join on a busy Mac (#1651).
 
 ## Constraints and failure behavior
+
+### Routing context header and wide layout
+
+Routing keeps its descriptive request heading, visible stage caption and
+full request story. At 1100px card width the stage and caption share the
+upper left column, with the story on the right. The page keeps its shared
+1200px content cap. Context stays below both columns. Its overview and
+content list share a row from 800px, using the same split so the separators
+align; the content label and scrollable filters remain on one line, and a
+long list scrolls within the card. Smaller cards stack these regions.
+
+A request with prompt data has one clickable context header. Closed, it
+shows used/window tokens, fill, cache and the occupancy bar; the grid and
+content rows are not constructed until opened. Open, the counts appear in
+the body, without a second header. The preference is stored separately as
+`magpie.routingContext`; an absent preference reads the existing
+`magpie.ctxShut` choice. An opening from Usage's Context tab applies to one
+request without replacing the saved choice. The next selected request
+restores it. Clicking the header keeps its position, and its preference
+survives incoming requests and reloads.
+
+The existing live context patching, cache state, text viewer and Routing
+story's node and logo retention remain in use. An open card retains its
+cells and unchanged rows while a new prompt arrives. The fixed grid row
+height bounds the space used by unused tokens. Usage context cards keep
+their existing header and layout.
+While a new live prompt is still being read, the carried context remains
+available for opening and closing without removing the card.
+
+See `routing-context-layout.test.cjs`, `routing-context-fold.test.cjs`,
+`routing-ctx-fold.test.cjs`, `routing-live-patch.test.cjs` and
+`routing-ctx-still.test.cjs`; `routing-log-icons.test.cjs` guards main's
+live story and logo retention in both engines and all five languages.
 
 ### Streamed output speed
 
@@ -69,6 +103,14 @@ endpoint, by the upstream that answered (`summaryUpstream` in
 [`continuation.go`](../../internal/gateway/continuation.go)). Optional
 OTel attributes carry the evidence without response text. The existing burst and held-content limits in
 `DecodeOf` still apply, and hidden reasoning does not enter average speed.
+
+A streamed request's duration (`Millis`, which ends every speed window)
+ends when its last try's reply ended, not when `serve` returns: what the
+gateway writes down after an answer (`answered`'s sticks, the provider's
+last answer in `NoteServed`) goes to disk, and on a busy disk took
+seconds, which made a paced reply read as held back and tell no speed
+(#1939, `TestSpeedEndsWithTheReply`). A decision group's row is timed the
+same way.
 
 `TestVisibleReasoningSpeed`, `TestReasoningSpeedEvidence`,
 `TestReasoningSpeedThroughGateway`, `TestMixedRedactedReasoning`,
@@ -164,6 +206,27 @@ under its id (`render`, #1835). The row itself keeps one line: the
 fullest window while idle, what it is doing while it answers. See
 `routing-seat-windows.test.cjs`.
 
+### Stored agent sessions in WSL
+
+The Sessions page uses `sessions.ListAgent`; Usage → Sessions uses
+`sessions.List` and `StatsFor` through the handlers in
+[`sessions.go`](../../internal/gui/sessions.go) and
+[`sessions_manage.go`](../../internal/gui/sessions_manage.go).
+On Windows, [`internal/sessions/wsl.go`](../../internal/sessions/wsl.go)
+reads running distros through their WSL shared paths. A stopped distro keeps
+its cached listing and is not opened; running distros are relisted at most
+every 30 seconds.
+
+For omp, [`ompRootsIn`](../../internal/sessions/omp.go) includes both
+`~/.omp/agent/sessions` and
+`~/.omp/profiles/<name>/agent/sessions`. Subagents and advisor files count
+in their parent session. A profile session's Resume command selects its
+own profile with `omp --profile <name> --resume <id>`, including when
+resumed through `wsl.exe`. Delete and Restore preserve its original
+profile path and artifacts. Windows does not discover arbitrary stores
+selected by a distro's `PI_CODING_AGENT_DIR`, XDG variables or
+`--session-dir`.
+
 ### Desktop fonts
 
 Settings → General offers independent interface and code fonts, each with
@@ -220,9 +283,37 @@ remain in the list, preserves them across summary refreshes, and offers a
 retry after a failed read. See `TestRecentCallBodiesOnDemand` and
 `recent-call-bodies.test.cjs`.
 
+### Plugin check-in switches
+
+A plugin's Usage-card Auto check-in button reads the persisted
+`settings.pluginCheckins[provider]` first (`pluginCheckinOn` in
+[`app.js`](../../internal/gui/assets/app.js)). `/api/state` returns that map
+without the derived `checkinPlugins` list included by `/api/settings`.
+An explicit saved false wins over the list; when no saved choice exists,
+the list's resolved vendor default remains the fallback, and without the
+list (a state refresh) the switch of the built-in check-in the plugin took
+over is (`PLUGIN_CHECKIN_INHERITS`, the ids `provider.PluginCheckinOn` names;
+a test reads both). This keeps a saved
+switch on through a focus refresh and lets the next click turn it off.
+[`plugin-checkin.test.cjs`](../../internal/gui/tests/plugin-checkin.test.cjs)
+covers both response shapes, refreshes and the subsequent toggle.
+
+### Plugin options
+
+A plugin provider's editor shows the options its plugin declares
+(`pluginOptionsField` in [`app.js`](../../internal/gui/assets/app.js); see
+[provider-plugins.md](provider-plugins.md#a-plugins-own-options)). The
+plugin's label, description and `confirm` text go in as text, never as HTML.
+A change is kept in `draft.pluginOptions` until Save, which posts each one
+to `POST /api/settings/plugin-option` before the provider's own save. An
+option switched back to where it was is dropped from the draft, so it isn't
+posted and doesn't make the editor dirty.
+[`plugin-options.test.cjs`](../../internal/gui/tests/plugin-options.test.cjs)
+covers it.
+
 ### Shared UI rules
 
-- Settings → General is laid out as macOS System Settings is (1ooogle on X): a row says its name alone when that says enough (Appearance, Language, Text size, the fonts, the tray click, the Codex model rows, Open at login, Show in Dock), and keeps one short line where the setting isn't clear from its name or has a consequence (Long conversations, Lightweight mode, Prevent sleep, Session terminal, Codex subagents). A font row's line shows only while its fonts load or fail; the text size keys are the choices' tooltip. Language is one menu button showing the language picked, opened in the app's menu (`renderLangPick`). See `settings-general.test.cjs`.
+- Settings → General is laid out as macOS System Settings is (1ooogle on X): a row says its name alone when that says enough (Appearance, Colorblind mode, Language, Text size, the fonts, the tray click, the Codex model rows, Open at login, Show in Dock), and keeps one short line where the setting isn't clear from its name or has a consequence (Long conversations, Lightweight mode, Prevent sleep, Session terminal, Codex subagents). A font row's line shows only while its fonts load or fail; the text size keys are the choices' tooltip, and Colorblind mode's note is its Off/On control's (`#colorblindSegs`). Colorblind mode (`settings.Colorblind`, `data-colorblind="1"` on `:root`, #2073) switches the chart series (`--c1`…`--c7`) in both light and dark themes to an Okabe–Ito palette where adjacent series differ in hue and lightness. On a quota curve each window (`data-series`, its index mod 7, set by `drawQuotaPlot` and `quotaCurve`'s legend only) gets a dash of its own on `path.qc-line`, its legend key shows a sample of that line (`.qc-sample`) for the dot, and the even paces (`line.qc-even`) are dotted; the curve's tooltip says so. The balance curve sets no `data-series` and keeps its solid line, dashed fit and dot. The Context tab's "good" grade, which takes `--c2` as a colour rather than a series, keeps a blue (`--c1`). Language is one menu button showing the language picked, opened in the app's menu (`renderLangPick`). See `settings-general.test.cjs` and `quota-curve.test.cjs`.
 - Settings' search-provider picker offers **Off**, saved as `searcher: "off"`. Its help explains API-only search and suppresses provider fallback/own-search hints while off; the search priority row is hidden because no provider competes with the APIs. See [gateway search behavior](gateway-routing.md#turning-provider-search-off), [`renderSearcher`](../../internal/gui/assets/app.js), `TestSettingsSearchProviderOff` and `searcher-pick.test.cjs`.
 - Settings' Search APIs add row has a base URL field under the key for every API (#1580): the vendor's own address is its placeholder, picking an API already added fills in its saved URL so a new key alone keeps it, and Add with no key changes only the URL. See [a search API's base URL](gateway-routing.md#a-search-apis-base-url), [`renderSearch`](../../internal/gui/assets/app.js) and `search-api.test.cjs`.
 - Every user-visible string has zh, zh-TW, ja and de translations with the same placeholders. `gui-zh-tw.test.cjs`, `gui-ja.test.cjs` and `gui-de.test.cjs` fail on a missing one; `gui-zh-tw.test.cjs` also fails on a zh-TW string with a Simplified character left in it.
@@ -233,6 +324,9 @@ retry after a failed read. See `TestRecentCallBodiesOnDemand` and
 - A request's details in the Usage ledger say its tokens at every width (#1839, `ledDetail`): "{i} in · {o} out · {r} cache read · {w} cache creation", 0 said as 0, with how much was written for 5 minutes and for an hour when it says so. A failure that spent nothing has no Tokens row. See `ledger-cache-tokens.test.cjs` and `usage-ledger-detail.test.cjs`.
 - The requests magpie makes by itself (a routing classifier's, a web search's, an image description's) are told apart from the agents' on the Usage page (#1839): magpie's row among the agents and its rows in the ledger carry a "magpie's own" mark (`ownBadge`), an account's, key's or model's row adds "{n} by magpie itself" from the summary's `own`, and an account's card says how many of the period's requests were magpie's own (`ownLine`, drawn again once the summary comes after the allowances). See `own-requests.test.cjs` and `TestSummaryCountsMagpiesOwnCallsApart`.
 - Opening the allowances is asking to see them (#1588, `quotasOpened` in `app.js`): the Usage page from the nav or its Overview tab picked, the window brought back to the front on the Overview, the tray panel's Allowances tab picked or the panel brought up on it, and a menu bar cell clicked each load `usage/quotas?asked=1`, as Refresh now does. An asked read makes the backend read every account again (`AskClaudeUsage`), so an opening within 30s (`QUOTAS_OPEN_GAP`) of the last asked read sends an ordinary read instead, which joins one on its way; Refresh now always asks. A panel page loaded while it is put away (hidden, or without focus) doesn't ask. The timed refresh is unchanged and never asks. See `allowance-open-read.test.cjs`.
+- The menu bar can show magpie's own totals beside the allowances (#1984): `usage:today` and `usage:7d` in `settings.TrayUsages`, offered after the cards in the same picker. `trayUsageCards` sums them with `usage.QueryPage(p, Filter{}, 0, 1).Sum` (the Requests tab's and the panel's cached ledger sum, gateway and session-file calls together) and asks no vendor when only totals are picked; `trayTotalCard` makes every token (in, out and cache, as `allTokens`), marked `Σ` so it doesn't read as the input, over the cost in Settings' currency, `+` when some calls had no price, the cost row left out when none had one. The Mac draws them as plain cells, the bird beside them saying whose. A click opens the Requests tab at the period (`quotaView`, `?tab=requests&period=`) or the panel's Usage tab (`panelUseFocus`). No 3-day total: the Usage page has no such window. See `TestTrayTotals` and `tray-totals.test.cjs`.
+- A window's Pace is a number on its card's reset line (fflake33 on Discord): the share used less the share of the window gone by, in points, "Pace +12%" over an even pace and "−8%" under it, turned with the meter when it shows what is left, amber while more is used than an even pace would have (`quotaPace`, `paceLine`). The window's start is the gateway's, `startsAt` from `provider.WithWindowStarts` (its reset less its span, `QuotaWindow.Bounds`); a window whose span isn't known, with no limit, or a past cycle has none. Settings › *Menu bar pace* (`settings.TrayPace`, off by default, hidden on Windows, whose tray shows no text) puts the same number beside each figure in the menu bar and in its tooltip (`trayPace`, `QuotaWindow.Pace`). See `TestWindowPace`, `TestTrayUsagePace` and `quota-pace.test.cjs`.
+- In Usage → Allowances, Trends → Cycle offers each account's own recorded cycle menu beside its curve (`quotaCurve`, `quotaRecordedCycles` in [`app.js`](../../internal/gui/assets/app.js)). The longest window (usually weekly) owns the menu; shorter windows are drawn over the selected dates with their own reset breaks. `/api/usage/quotas/history?days=45` supplies all retained readings, including remote cards. Completed cycles come from observed boundaries, not seven-day arithmetic; an early reset ends the previous cycle at the vendor's new start if it fits between readings, otherwise at the first new reading. Each menu option gives its observed duration, so an early reset is not labelled as a full seven days. The selected meters, plot, legend, tooltip and dashed pace use that cycle's last readings, never today's percentages. A window without a reading in the selected interval says so instead of showing a current value. Historical meters show the cycle end and sampling time; current account actions, balances and policies are left out until returning to the current view. Accounts are independent, and a selection survives card refreshes in the same page. Trends → 2 days temporarily shows recent readings; Off removes the curves; the tray always shows its current cycle. See `quota-curve.test.cjs` and the [history limits and reset inference](providers-accounts.md#constraints-and-failure-behavior).
 - The Usage page's cards are packed into columns, never all stretched to a row's height (`packUsage`, #860): each card in that order goes to the leftmost column that ends highest, on 1px grid rows, so short cards stack beside a tall one. The last card in each column then reaches down to where the tallest column ends (a `min-height`, cleared before the cards are measured again), so cards side by side in one row are as tall as each other and a stack ends with the tall card beside it (ikunbots on X); content stays at each card's top. The page's order (DOM, dragging, Alt+arrows) stays `UsageOrder`. The column count is the most 260px columns that fit, or one fewer when that leaves much less empty room; it is chosen again only when the cards change or the width fits another number of columns, so a card opened or folded stays where it is, even as the scrollbar comes in. See `usage-pack.test.cjs`.
 - The Providers page has a search box over its list (#1614, `findProviders` in [`app.js`](../../internal/gui/assets/app.js)): the words typed keep the rows, on and off, whose text or data say them all: name, id, preset, addresses, every model's id and name, the account's user and plan and each login's, account names and key names. The Turned off fold stays open while searching; Escape or clearing the box shows every row and the fold as it was. A row that is on reorders by dragging its logo, Alt+↑/↓, Alt+Shift+↑/↓ (top, bottom) or its right-click menu (`openProviderMenu`: Move to top, Move up, Move down, Move to bottom). While searching, a step or a drop moves it among the rows shown (it takes the place of the row it passes, `stepProvider`, `shownToOn`) and the hidden ones keep their order; Move to top and Move to bottom go to the ends of the whole list. Every move saves the whole order through `POST /api/providers/arrange`. See `provider-find.test.cjs` and `provider-order.test.cjs`.
 - A new user's Agents page (the window's first page and the panel's Agents tab) has a *Get started* card above the agents in the welcome's place (wangye1644294 on X, `guideCard` in [`app.js`](../../internal/gui/assets/app.js)). Its three steps are: add a model source; connect an agent, where the agents magpie found that can be connected are named and each is connected in one click (`agents/connect`); and, optional, a routing group, with the most harmless starter template that can be made from the user's models (`provider.Templates`, Never stuck first) added in one click through `POST /api/groups/template`. Every tick comes from the state: the models magpie serves (`served` in `/api/state`, groups left out), an agent wired, or a group that isn't automatic. None comes from the card having been seen. The card goes once the first two steps are done. Its close button saves `settings.GuideHidden` through `POST /api/settings/guide`, so the panel, the window and a reload agree, and the Settings save keeps it. See `getting-started.test.cjs`.
@@ -246,6 +340,7 @@ retry after a failed read. See `TestRecentCallBodiesOnDemand` and
 - On GTK 3 builds, the app gives GDK a font DPI before the first webview when it has none (`fontDPI`, [`fontdpi_gtk3.h`](../../internal/gui/fontdpi_gtk3.h)). GDK's unset value is -1, and WebKitGTK 2.54's GTK 3 settings reader multiplies it by 1024 unchecked, so every page lays out at a negative width with a 9000000px font (#1371). An unset DPI takes `gtk-xft-dpi`, or 96, times a valid `GDK_DPI_SCALE`; a positive one is left alone. Wails initialises GTK (its GtkApplication) only inside `Run` and makes each window from a default-idle-priority callback on the main loop, so `fontDPI`, called just before `Run`, queues the check as a `G_PRIORITY_HIGH` idle: it runs on the main thread after GTK's own start, before the first window. `TestFontDPIUnset` opens a real WebKitGTK page through `magpie_font_dpi` and needs a display (Xvfb).
 - Tests never touch a live agent config. The package's `TestMain` runs under `testenv`'s home of its own. A macOS test that shows windows runs them in a process of its own through `runAppKit` ([`appkit_darwin_test.go`](../../internal/gui/appkit_darwin_test.go)). AppKit and WebKit take their home from the account, not from HOME, so `runAppKit` gives them a temporary one with `CFFIXED_USER_HOME`; appearance, contrast and languages still come from the account. The test fails when that process leaves a folder in the real `~/Library/WebKit` or `~/Library/Caches`. Playwright tests serve `assets/` with isolated `/api` fixtures.
 - `POST /api/settings/codex-auto-review` accepts an empty value (Codex's own choice) or an exact model/group ID in `provider.Served`, including unlisted providers. A known provider with an unknown or empty model name is rejected without changing the saved reviewer or catalog tag. Generic gateway request resolution remains permissive; it is not the validator for this setting. See `Handler` in [`api.go`](../../internal/gui/api.go) and `TestCodexAutoReviewSetting` in [`codex_auto_review_test.go`](../../internal/gui/codex_auto_review_test.go).
+- `Settings -> Sync and backup` and `/api/davsync/{action}` configure and run encrypted WebDAV, S3 or GitHub setup sync. They share the CLI's operations and expose credential presence, never the secrets. State, merge, failure and compatibility behavior are described in [Sync and backup](sync-backup.md).
 
 `openModal` makes the background inert when an editor opens fresh, leaving
 confirmations and menus interactive through redraws. `closeModal` releases
@@ -256,6 +351,11 @@ Routing's New group buttons share `newGroup`, which asks before replacing a
 dirty group draft; Cancel retains the draft and Discard opens the new editor.
 `newGroupWith` applies the same guard when creating a group from a model and
 waits for `show` to accept navigation before creating its draft.
+
+The Plugins page updates the npm search-results section when a search answers,
+leaving suggested plugin cards in place so a click begun before the answer still
+opens the intended plugin. `plugin-market.test.cjs` holds the search response
+between pointerdown and pointerup to check this in Chromium and WebKit.
 
 ## Verification
 
@@ -275,7 +375,13 @@ in [`cursor_editor_test.go`](../../internal/sessions/cursor_editor_test.go).
 
 Messages without tokens or an active-time estimate still count as sessions
 in the overview. Cursor and OpenCode conversations can be opened through
-the existing transcript API, including CLI reasoning and tool calls. When the selected date range is empty but
+the existing transcript API, including CLI reasoning and tool calls. So can
+Kimi Code's main agent, from its `wire.jsonl`: a turn's `turn.prompt` and
+loop events from protocol 1.4 on (so a turn still running shows), and the
+untimed `context.append_message` records of a session imported from
+kimi-cli; Kimi Code's own timed messages repeat those and are skipped
+([`transcript_kimi.go`](../../internal/sessions/transcript_kimi.go),
+`TestKimiCodeTranscript`). When the selected date range is empty but
 matching history exists, Usage offers **All sessions**, preserving the agent,
 model, folder and search filters. See `sessions-empty-range.test.cjs`.
 
@@ -302,3 +408,28 @@ Apple silicon), they check a program that names its SDK in
 `LC_VERSION_MIN_MACOSX`, as go test links one for an Intel Mac. Their
 presses are sent within the test's own process, and no system setting
 changes.
+
+### Agent visibility management
+
+The Agents page's Manage button sits inside the list's footer beside the fold
+control, and stays available when nothing is folded. The tray panel keeps its
+existing fold control. The Manage agents dialog includes folded and hidden agents.
+Search matches names and IDs; select all and invert apply to the search results,
+while Select unconnected agents replaces the selection with matching agents not
+on magpie (neither wired, added nor drifting). Selection survives search changes.
+Hide selected and Unhide selected each save one arrangement through the existing
+`POST /api/agents/arrange`, preserving order and agents outside the operation.
+Only a successful save changes the list; a failure keeps the selection for retry.
+While saving, Done, Escape and the backdrop cannot close the manager and expose
+conflicting row actions. Closing is restored on either success or failure.
+A completed save invalidates older in-flight state reads for the arrangement
+fields only. Fresh reads still accept other windows' visibility changes; bulk
+unhide does not add a lasting client-side override. These races are covered by
+`agent-visibility-saving.test.cjs`.
+While the manager is open, state refreshes update its visibility labels and
+action availability in place, preserving the search, selection and keyboard focus.
+These operations never connect, disconnect or edit an agent's files. Unhiding
+still follows the existing Not set up folding rules. The dialog explains that
+restoring visibility does not pin an unconfigured agent into the main list.
+See `agent-bulk-visibility.test.cjs` for persistence, partial selection, failed
+saves, narrow layouts and all five languages in Chromium and WebKit.

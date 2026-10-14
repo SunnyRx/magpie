@@ -66,7 +66,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // tall enough for the whole editor, its Cancel clicked where it is
       // (under the names setting over the groups)
       // the window wider by the sidebar beside the page: the editor's foot in sight
-      const page = await (await browser.newContext({ viewport: { width: 1360, height: 1600 }, reducedMotion: "reduce" })).newPage();
+      const page = await (await browser.newContext({ viewport: { width: 1360, height: 1700 }, reducedMotion: "reduce" })).newPage();
       t.after(() => browser.close());
       page.setDefaultTimeout(5000);
       const errors = [], posts = [];
@@ -97,7 +97,17 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await head.click();
       await page.locator("#status").filter({ hasText: w.first }).waitFor();
       assert.equal(await ed.locator("input").first().inputValue(), "Sol 2", "the edit is kept");
-      await ed.locator("button", { hasText: new RegExp("^" + w.cancel + "$") }).click();
+      const cancel = ed.locator("button", { hasText: new RegExp("^" + w.cancel + "$") });
+      // A dirty-editor notice changes the footer's room. Reach Cancel
+      // with the wheel; the app intentionally undoes a click's own scroll.
+      for (let i = 0; i < 20; i++) {
+        const box = await cancel.boundingBox(), view = await page.locator("#view-routing").boundingBox();
+        if (box && box.y >= view.y && box.y + box.height <= view.y + view.height) break;
+        await page.mouse.move(700, 700);
+        await page.mouse.wheel(0, box && box.y < view.y ? -250 : 250);
+        await page.waitForTimeout(100);
+      }
+      await cancel.click();
       await page.locator("dialog.action-confirm[open] button").last().click();
       await closed();
 
